@@ -15,6 +15,7 @@ import {
     settingResultId,
     toggleCandidates,
 } from '../lib/actions.js';
+import {buildPreview} from '../lib/preview.js';
 import {matchQuality} from '../lib/scoring.js';
 
 /** All four toggles, off and available — the shape the shell hands in. */
@@ -263,4 +264,22 @@ test('the prefixes are the ones the contract pins', () => {
     assert.equal(SETTINGS_PROVIDER, 'settings');
     assert.deepEqual(ACTION_VERBS, ['lock', 'suspend', 'logout']);
     assert.deepEqual(TOGGLE_KEYS, ['wifi', 'bluetooth', 'dnd', 'appearance']);
+});
+
+// The preview pane (ticket 04) renders every `kind: 'text'` payload as one Details row; an action or
+// toggle row must not lose its sentence — or its flags — on the way there.
+test('an action and a toggle row render in the preview pane', () => {
+    const [logout] = actionCandidates('logout');
+    assert.deepEqual(buildPreview(logout), {
+        title: 'Log Out',
+        rows: [{label: 'Details', value: 'Ends your session. Asks for confirmation first.'}],
+    });
+
+    const [wifi] = toggleCandidates('wifi', {toggles: [{key: 'wifi', on: true}]});
+    assert.deepEqual(buildPreview(wifi).rows, [{label: 'Details', value: 'Wi-Fi is on.'}]);
+
+    const [bluetooth] = toggleCandidates('bluetooth', {
+        toggles: [{key: 'bluetooth', available: false, reason: 'the Bluetooth service is not running'}],
+    });
+    assert.match(buildPreview(bluetooth).rows[0].value, /Bluetooth is unavailable: the Bluetooth service is not running/);
 });
