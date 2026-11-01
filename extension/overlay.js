@@ -8,6 +8,7 @@
 
 import Atk from 'gi://Atk';
 import Clutter from 'gi://Clutter';
+import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -43,6 +44,7 @@ export class LumenOverlay {
         this._grab = null;
         this._keyFocusId = 0;
         this._capturedEventId = 0;
+        this._entryKeyId = 0;
         this._monitorsChangedId = 0;
         this._cardSizeId = 0;
         this._buttonPressId = 0;
@@ -203,11 +205,18 @@ export class LumenOverlay {
         this._backdrop.show();
         this._fadeIn();
 
-        this._grab = Main.pushModal(this._backdrop) ?? null;
+        // `actionMode` matters: the default (NONE) filters out every global keybinding, so with the
+        // overlay open the summon shortcut could no longer toggle it closed.
+        this._grab = Main.pushModal(this._backdrop, {actionMode: Shell.ActionMode.NORMAL}) ?? null;
         this._entry.grab_key_focus();
 
         this._capturedEventId = global.stage.connect(
             'captured-event', (...args) => this._onCapturedEvent(...args));
+        // Keys also arrive on the focused entry — the one place we know receives them, since typing
+        // works. Routing both through `_handleKey` means Escape/Enter/arrows cannot be swallowed.
+        this._entryKeyId = this._entry.clutter_text.connect(
+            'key-press-event', (_actor, event) =>
+                this._handleKey(event) ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE);
         this._keyFocusId = global.stage.connect(
             'notify::key-focus', () => this._onKeyFocusChanged());
     }
@@ -254,6 +263,11 @@ export class LumenOverlay {
         if (this._keyFocusId) {
             global.stage.disconnect(this._keyFocusId);
             this._keyFocusId = 0;
+        }
+
+        if (this._entryKeyId) {
+            this._entry.clutter_text.disconnect(this._entryKeyId);
+            this._entryKeyId = 0;
         }
 
         if (this._grab) {
@@ -525,7 +539,8 @@ export class LumenOverlay {
     // Rows live in mixed parents (the top-hit group, the section boxes), so measure against the
     // scrolled content rather than the row's own parent.
     _scrollIntoView(row) {
-        const adjustment = this._scroll?.get_vscroll_bar()?.get_adjustment();
+        // GNOME 50 dropped the scroll-bar getter: the adjustment is a property on the view.
+        const adjustment = this._scroll?.vadjustment;
         if (!adjustment)
             return;
 
@@ -637,16 +652,18 @@ export class LumenOverlay {
         if (event.type() !== Clutter.EventType.KEY_PRESS)
             return Clutter.EVENT_PROPAGATE;
 
-        if (event.get_key_symbol() === Clutter.KEY_Escape) {
+        return this._handleKey(event) ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE;
+    }
+
+    // Escape closes; everything else belongs to the list (extension.js). Reached from the stage's
+    // capture phase and from the focused entry's key-press-event, whichever fires.
+    _handleKey(event) {
+        const symbol = event.get_key_symbol();
+        if (symbol === Clutter.KEY_Escape) {
             this.close();
-            return Clutter.EVENT_STOP;
+            return true;
         }
-
-        // The list owns the navigation keys; returns true from `onKey` means "consumed".
-        if (this._onKey?.(event.get_key_symbol(), event.get_state(), event))
-            return Clutter.EVENT_STOP;
-
-        return Clutter.EVENT_PROPAGATE;
+        return this._onKey?.(symbol, event.get_state(), event) === true;
     }
 
     _onButtonPress(_actor, event) {

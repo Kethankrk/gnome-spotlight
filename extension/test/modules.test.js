@@ -177,6 +177,15 @@ test('the shell glue sets no removed St properties (`spacing` is CSS-only)', () 
     const css = read('stylesheet.css');
     assert.match(css, /\.lumen-card\s*\{[^}]*spacing:/s, '.lumen-card needs its spacing in CSS');
     assert.match(css, /\.lumen-row\s*\{[^}]*spacing:/s, '.lumen-row needs its spacing in CSS');
+
+    // St.ScrollView's old scroll-bar getter is gone in GNOME 50; the adjustment is a property.
+    assert.doesNotMatch(read('overlay.js'), /\.get_vscroll_bar\(/,
+        'use scrollView.vadjustment: the scroll-bar getter was removed');
+
+    // `Main.pushModal` defaults to ActionMode.NONE, which filters out every global keybinding —
+    // including the summon shortcut, so it could not toggle the overlay closed.
+    assert.match(read('overlay.js'), /pushModal\([^)]*actionMode:/s,
+        'pushModal needs an actionMode or global shortcuts stop working while open');
 });
 
 test('the stylesheet themes the overlay for a light and a dark card', () => {
