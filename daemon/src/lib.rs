@@ -11,6 +11,7 @@ pub mod index;
 pub mod protocol;
 pub mod providers;
 pub mod ranking;
+pub mod recent;
 pub mod registry;
 pub mod store;
 
