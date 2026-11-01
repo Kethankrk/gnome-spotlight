@@ -20,7 +20,7 @@ schemas:
 
 pack: schemas
 	mkdir -p dist
-	gnome-extensions pack extension/ --extra-source=overlay.js --extra-source=lib/ -o dist/
+	gnome-extensions pack extension/ --extra-source=overlay.js --extra-source=system.js --extra-source=lib/ -o dist/
 
 clean:
 	$(CARGO) clean
