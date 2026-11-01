@@ -190,6 +190,161 @@ fn number_of(row: &HashMap<String, OwnedVariant>, key: &str) -> f64 {
     f64::try_from(row[key].try_clone().expect("cloneable")).expect("a number")
 }
 
+fn preview_of(row: &HashMap<String, OwnedVariant>) -> HashMap<String, OwnedVariant> {
+    HashMap::try_from(row["preview"].clone()).expect("preview must be a{sv}")
+}
+
+fn actions_of(row: &HashMap<String, OwnedVariant>) -> Vec<HashMap<String, OwnedVariant>> {
+    Vec::try_from(row["actions"].clone()).expect("actions must be aa{sv}")
+}
+
+/// One `Query` round trip: the rows the matching `ResultsChanged` carried.
+async fn search(
+    proxy: &zbus::Proxy<'_>,
+    text: &str,
+    enabled: Vec<&str>,
+    options: Options,
+) -> Vec<HashMap<String, OwnedVariant>> {
+    let mut changed = proxy
+        .receive_signal("ResultsChanged")
+        .await
+        .expect("ResultsChanged stream");
+    let _: String = proxy
+        .call("Query", &(text, enabled, options))
+        .await
+        .expect("Query");
+    let signal = changed.next().await.expect("ResultsChanged signal");
+    let (_id, results): (String, Vec<HashMap<String, OwnedVariant>>) =
+        signal.body().deserialize().expect("ResultsChanged body");
+    results
+}
+
+#[test]
+fn a_valid_expression_is_the_top_hit_with_its_value_and_a_copy_action() {
+    let harness = Harness::spawn();
+    let address = harness.address().to_string();
+    let name = harness.name().to_string();
+
+    let results = block(async move {
+        let connection = connect(&address).await.expect("connect to the bus");
+        let proxy = engine_proxy(&connection, &name)
+            .await
+            .expect("engine proxy");
+        let options = injected_options(vec![injected(
+            "app:org.gnome.Nautilus.desktop",
+            "applications",
+            "Files",
+        )]);
+        search(&proxy, "2 + 2", vec!["applications", "calculator"], options).await
+    });
+
+    let calculators = results
+        .iter()
+        .filter(|row| text_of(row, "provider") == "calculator")
+        .count();
+    assert_eq!(
+        calculators, 1,
+        "a parsed expression yields exactly one calculator row"
+    );
+    assert_eq!(
+        text_of(&results[0], "provider"),
+        "calculator",
+        "and it is the Top Hit, ahead of the injected application"
+    );
+    assert_eq!(text_of(&results[0], "id"), "calc:2 + 2");
+    assert_eq!(text_of(&results[0], "title"), "4");
+    assert!(
+        (number_of(&results[0], "score") - 0.40).abs() < 1e-9,
+        "the calculator's base weight is 0.40, got {}",
+        number_of(&results[0], "score")
+    );
+
+    let preview = preview_of(&results[0]);
+    assert_eq!(text_of(&preview, "kind"), "calculator");
+    assert_eq!(text_of(&preview, "expression"), "2 + 2");
+    assert_eq!(text_of(&preview, "value"), "4");
+    assert_eq!(text_of(&preview, "unit"), "", "arithmetic has no unit");
+
+    let actions = actions_of(&results[0]);
+    assert_eq!(actions.len(), 1, "the calculator offers one action");
+    assert_eq!(text_of(&actions[0], "id"), "copy");
+    assert_eq!(text_of(&actions[0], "handler"), "copy");
+}
+
+#[test]
+fn a_unit_conversion_is_the_top_hit_with_the_converted_value() {
+    let harness = Harness::spawn();
+    let address = harness.address().to_string();
+    let name = harness.name().to_string();
+
+    let results = block(async move {
+        let connection = connect(&address).await.expect("connect to the bus");
+        let proxy = engine_proxy(&connection, &name)
+            .await
+            .expect("engine proxy");
+        search(&proxy, "10 km in miles", vec!["calculator"], Options::new()).await
+    });
+
+    assert_eq!(results.len(), 1, "one conversion, one row");
+    assert_eq!(text_of(&results[0], "id"), "calc:10 km in miles");
+    assert_eq!(text_of(&results[0], "title"), "6.213712 mi");
+    let preview = preview_of(&results[0]);
+    assert_eq!(text_of(&preview, "kind"), "calculator");
+    assert_eq!(text_of(&preview, "value"), "6.213712");
+    assert_eq!(text_of(&preview, "unit"), "mi");
+}
+
+#[test]
+fn malformed_input_yields_no_result_at_all() {
+    const MALFORMED: [&str; 4] = ["2 +", "(2 + 3", "10 km in bananas", "abc 123"];
+
+    let harness = Harness::spawn();
+    let address = harness.address().to_string();
+    let name = harness.name().to_string();
+
+    let rows = block(async move {
+        let connection = connect(&address).await.expect("connect to the bus");
+        let proxy = engine_proxy(&connection, &name)
+            .await
+            .expect("engine proxy");
+        let mut rows = Vec::new();
+        for text in MALFORMED {
+            rows.push(search(&proxy, text, vec!["calculator"], Options::new()).await);
+        }
+        rows
+    });
+
+    for (text, results) in MALFORMED.iter().zip(rows) {
+        assert!(
+            results.is_empty(),
+            "`{text}` must be ignored, never shown as an error row"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_word_query_never_reaches_the_calculator() {
+    let harness = Harness::spawn();
+    let address = harness.address().to_string();
+    let name = harness.name().to_string();
+
+    let results = block(async move {
+        let connection = connect(&address).await.expect("connect to the bus");
+        let proxy = engine_proxy(&connection, &name)
+            .await
+            .expect("engine proxy");
+        search(
+            &proxy,
+            "nautilus",
+            vec!["applications", "calculator"],
+            Options::new(),
+        )
+        .await
+    });
+
+    assert!(results.is_empty(), "a word is a search, not an expression");
+}
+
 #[test]
 fn injected_candidates_are_ranked_and_an_exact_application_is_the_top_hit() {
     let harness = Harness::spawn();

@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::index;
 use crate::protocol::{ResultItem, CAPABILITY_IDS, PROVIDER_IDS};
-use crate::providers::{files, Provider, QueryRequest, Stub};
+use crate::providers::{calculator::Calculator, files, Provider, QueryRequest, Stub};
 use crate::ranking;
 
 /// How the daemon reaches the file index. The index is behind its own seam so that the daemon
@@ -30,7 +30,8 @@ pub struct Registry {
 
 impl Registry {
     /// The registry a daemon runs: every provider present, with `files` backed by whichever index
-    /// the configuration selected and the rest still stubs.
+    /// the configuration selected, the calculator wired to its real implementation, and the rest
+    /// still stubs until their ticket lands.
     ///
     /// Building it opens the index, which for `LocalSearch` means loading the library and probing
     /// the endpoint on this thread — before the bus name is owned, so the capability is right
@@ -42,7 +43,7 @@ impl Registry {
             Box::new(files::Files::new(Arc::clone(&index))),
             Box::new(Stub::new("recent", false)),
             Box::new(Stub::new("clipboard", false)),
-            Box::new(Stub::new("calculator", true)),
+            Box::new(Calculator::new()),
             Box::new(Stub::new("actions", false)),
             Box::new(Stub::new("settings", false)),
             Box::new(Stub::new("websearch", true)),
@@ -106,7 +107,9 @@ impl Registry {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| ranking::provider_rank(&a.provider).cmp(&ranking::provider_rank(&b.provider)))
+                .then_with(|| {
+                    ranking::provider_rank(&a.provider).cmp(&ranking::provider_rank(&b.provider))
+                })
                 .then_with(|| a.title.cmp(&b.title))
         });
 
@@ -182,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn without_an_index_the_extension_s_own_results_still_rank() {
+    fn without_an_index_the_extensions_own_results_still_rank() {
         let registry = Registry::new(&Indexer::None);
         let app = ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files");
         let request =
@@ -192,6 +195,48 @@ mod tests {
         let results = registry.query(&request);
         assert_eq!(results.len(), 1, "the file provider stays silent");
         assert_eq!(results[0].provider, "applications");
+    }
+
+    #[test]
+    fn an_expression_scores_the_calculators_base_weight_and_is_alone() {
+        let registry = Registry::new(&Indexer::None);
+
+        let results = registry.query_at(&QueryRequest::new("2 + 2", Vec::new()), 0);
+        assert_eq!(results.len(), 1, "one candidate, and no error row");
+        assert_eq!(results[0].provider, "calculator");
+        assert_eq!(results[0].id, "calc:2 + 2");
+        assert!(
+            (results[0].score - 0.40).abs() < 1e-9,
+            "base weight 0.40 + no title match, got {}",
+            results[0].score
+        );
+    }
+
+    #[test]
+    fn a_query_that_is_not_an_expression_leaves_the_calculator_silent() {
+        let registry = Registry::new(&Indexer::None);
+        for text in ["nautilus", "2 +", "abc 123", "10 km"] {
+            assert!(
+                registry
+                    .query_at(&QueryRequest::new(text, Vec::new()), 0)
+                    .is_empty(),
+                "`{text}` must produce nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn an_injected_application_does_not_outrank_a_recognised_expression() {
+        let registry = Registry::new(&Indexer::None);
+        let app = ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files");
+        let request = QueryRequest::new("2 + 2", Vec::new()).with_injected(vec![app]);
+
+        let results = registry.query_at(&request, 0);
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].provider, "calculator",
+            "the calculator is the Top Hit for a query that parses"
+        );
     }
 
     #[test]
