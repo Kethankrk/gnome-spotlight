@@ -45,3 +45,13 @@ test('a frequently used loosely matching app can beat an unused exact file', () 
     const exactCold = score({provider: 'files', title: 'file'}, 'file', {now: NOW});
     assert.ok(looselyUsed > exactCold);
 });
+
+test('the web-search row is scored by its base weight alone', () => {
+    const row = {provider: 'websearch', title: 'Search the web for term'};
+    assert.equal(score(row, 'term', {now: NOW}), 0.05);
+    assert.ok(
+        score({provider: 'files', title: 'xterm-settings.txt'}, 'term', {now: NOW})
+            > score(row, 'term', {now: NOW}),
+        'a real result always outranks the last resort',
+    );
+});

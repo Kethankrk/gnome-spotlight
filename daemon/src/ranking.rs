@@ -71,11 +71,18 @@ pub fn usage_bonus(usage: u32) -> f64 {
 }
 
 /// The final score: base weight + match quality + recency + usage.
+///
+/// The web-search row is the exception: its title is spelled out of the query ("Search the web for
+/// …"), so matching it against the query would always score it as a hit and float the last-resort
+/// row above real results. It is scored by its base weight alone (ticket 08, contract §15).
 pub fn score(item: &ResultItem, query: &str, now_ms: i64) -> f64 {
-    base_weight(&item.provider)
-        + match_quality(&item.title, query)
-        + recency_bonus(item.timestamp, now_ms)
-        + usage_bonus(item.usage)
+    let quality = if item.provider == "websearch" {
+        0.0
+    } else {
+        match_quality(&item.title, query)
+    };
+
+    base_weight(&item.provider) + quality + recency_bonus(item.timestamp, now_ms) + usage_bonus(item.usage)
 }
 
 /// The tie-break position of a provider in the section order.
@@ -128,5 +135,18 @@ mod tests {
     fn provider_rank_follows_the_section_order() {
         assert!(provider_rank("applications") < provider_rank("files"));
         assert!(provider_rank("files") < provider_rank("websearch"));
+    }
+
+    #[test]
+    fn the_web_search_row_is_scored_by_its_base_weight_alone() {
+        let row = item("websearch", "Search the web for term");
+        assert!(
+            (score(&row, "term", 0) - 0.05).abs() < 1e-9,
+            "the row's title is built from the query, so it cannot be matched against it"
+        );
+        assert!(
+            score(&item("files", "xterm-settings.txt"), "term", 0) > score(&row, "term", 0),
+            "and a real result always outranks the last resort"
+        );
     }
 }

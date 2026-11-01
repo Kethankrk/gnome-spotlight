@@ -39,8 +39,12 @@ pub const PROVIDER_IDS: [&str; 8] = [
 /// The ids that may appear in the `Capabilities` property, in report order.
 pub const CAPABILITY_IDS: [&str; 5] = ["files", "recent", "clipboard", "calculator", "websearch"];
 
+/// The shell action that opens a url in the user's default browser: the one shell action the
+/// daemon routes today (the web-search row, ticket 08).
+pub const OPEN_URL: &str = "open-url";
+
 /// Shell-only actions the daemon routes back to the extension instead of performing.
-pub const SHELL_ACTIONS: [&str; 1] = ["open-url"];
+pub const SHELL_ACTIONS: [&str; 1] = [OPEN_URL];
 
 /// The only values an action's `handler` field may take.
 pub const ACTION_HANDLERS: [&str; 4] = ["open", "copy", "reveal", "shell"];
@@ -193,6 +197,14 @@ pub fn string_field(row: &Row, key: &str) -> Option<String> {
     row.get(key).and_then(|v| String::try_from(v).ok())
 }
 
+/// The provider a result id belongs to, from its contract §3 prefix — the other direction of
+/// [`id_prefix`], which `Activate` routing needs (ticket 08).
+pub fn provider_of_id(id: &str) -> Option<&'static str> {
+    PROVIDER_IDS.iter().copied().find(|provider| {
+        id_prefix(provider).is_some_and(|prefix| id.starts_with(prefix))
+    })
+}
+
 /// Convert an owned `a{sv}` map into a [`Row`].
 pub fn owned_row(map: HashMap<String, OwnedVariant>) -> Row {
     map.into_iter().map(|(k, v)| (k, Variant::from(v))).collect()
@@ -283,6 +295,20 @@ mod tests {
         }
         assert_eq!(id_prefix("nonsense"), None);
         assert_eq!(id_prefix("websearch"), Some("web:"));
+    }
+
+    #[test]
+    fn a_result_id_names_the_provider_that_owns_it() {
+        for provider in PROVIDER_IDS {
+            let prefix = id_prefix(provider).expect("a prefix");
+            assert_eq!(
+                provider_of_id(&format!("{prefix}something")),
+                Some(provider),
+                "`{prefix}` belongs to {provider}"
+            );
+        }
+        assert_eq!(provider_of_id("nonsense"), None);
+        assert_eq!(provider_of_id(""), None);
     }
 
     #[test]
