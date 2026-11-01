@@ -71,16 +71,41 @@ It prints every path it wrote. If it warns that `~/.local/bin` is not on your `P
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile   # then log out and back in
 ```
 
-### 4. Enable the extension
+### 4. Log out and back in
+
+GNOME Shell scans the extensions directory **once, at startup**. Until the shell restarts,
+`gnome-extensions enable` reports *"does not exist"* — that is a stale scan, not a failed install.
+On Wayland you cannot restart the shell in place, so log out and log back in now.
+
+### 5. Enable the extension
 
 ```sh
 gnome-extensions enable lumen@kethan.dev
 ```
 
-Then **log out and back in** — a freshly installed extension is only picked up by a new shell
-session on Wayland. The daemon starts with the session; you do not start it by hand.
+The daemon starts with the session; you do not start it by hand.
 
-### 5. Use it
+<details>
+<summary>Skip the second login: enable it before the restart</summary>
+
+`gnome-extensions enable` only writes the shell's `enabled-extensions` list, so you can write it
+ahead of the restart instead — then it comes up already enabled:
+
+```sh
+python3 - <<'PY'
+import ast, subprocess
+cur = ast.literal_eval(subprocess.check_output(
+    ['gsettings', 'get', 'org.gnome.shell', 'enabled-extensions'], text=True))
+if 'lumen@kethan.dev' not in cur:
+    cur.append('lumen@kethan.dev')
+    subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'enabled-extensions',
+                    '[' + ', '.join(map(repr, cur)) + ']'], check=True)
+PY
+```
+
+</details>
+
+### 6. Use it
 
 Press **`Super+Space`** to summon the overlay; type to search, Enter to open, Escape to dismiss.
 Change the shortcut in the preferences window:
@@ -107,6 +132,18 @@ lumen --version                      # the installed version
 systemctl --user status lumen.service
 ~/.local/bin/lumen-daemon --help     # the daemon's own flags
 ```
+
+## Troubleshooting
+
+- **`gnome-extensions enable` says *"does not exist"*** — the running shell started before the
+  extension was installed; it scans the directory only at startup. Log out and back in, then enable
+  it (step 4–5).
+- **Check whether the shell loaded it** — `gnome-extensions info lumen@kethan.dev` should report
+  `State: ENABLED`. If it says `ERROR`, the journal has the traceback:
+  `journalctl -b -o cat | grep -i lumen`.
+- **The overlay does not open** — the engine may not be running: `lumen --status`. The shortcut may
+  also be taken: change it with `gnome-extensions prefs lumen@kethan.dev`.
+- **Turn it off** — `gnome-extensions disable lumen@kethan.dev`, then log out and back in.
 
 ## Development
 
