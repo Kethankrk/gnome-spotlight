@@ -114,10 +114,9 @@ Change the shortcut in the preferences window:
 gnome-extensions prefs lumen@kethan.dev
 ```
 
-> **Shortcut:** the default is **`Ctrl+Alt+Space`**, registered as a GNOME *custom shortcut* that
-> runs `lumen --toggle` (Settings → Keyboard → Custom Shortcuts; the preferences window keeps it in
-> sync). Avoid `Super+Space` and `Ctrl+Space` — those are the desktop's *Switch input source* and
-> the input method's trigger.
+> **Shortcut:** the default is **`Ctrl+Alt+Space`**, registered by the extension itself (mutter reads
+> it from the `summon-shortcut` key, which must be a string array). Avoid `Super+Space` and
+> `Ctrl+Space` — those are the desktop's *Switch input source* and the input method's trigger.
 
 ## Update and uninstall
 

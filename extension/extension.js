@@ -1,5 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
@@ -43,15 +44,6 @@ import {createClipboardSampler, shouldCapture, SAMPLE_INTERVAL_SECONDS} from './
 import {updateNotification, updateStatus, versionFilePaths} from './lib/update.js';
 
 const SUMMON_KEYBINDING = 'summon-shortcut';
-// The shortcut is a GNOME custom shortcut that runs the CLI. A display keybinding registered
-// through the window manager is not delivered by this shell build (five accelerators reported
-// "bound" and never fired), while this is the mechanism Settings → Keyboard → Custom Shortcuts
-// uses.
-const MEDIA_KEYS_SCHEMA = 'org.gnome.settings-daemon.plugins.media-keys';
-const CUSTOM_KEYBINDING_SCHEMA =
-    'org.gnome.settings-daemon.plugins.media-keys.custom-keybinding';
-const CUSTOM_KEYBINDING_PATH =
-    '/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/lumen/';
 const PROVIDERS_KEY = 'providers-enabled';
 const APPEARANCE_KEY = 'appearance';
 const CLIPBOARD_KEY = 'clipboard-enabled';
@@ -75,6 +67,7 @@ export default class LumenExtension extends Extension {
         this._proxy = null;
         this._proxySignals = [];
         this._owner = null;
+        this._keybindingBound = false;
         this._engine = {status: null, message: ENGINE_NOT_RUNNING};
         this._activeSearch = null;
         this._awaitingResults = false;
@@ -117,8 +110,8 @@ export default class LumenExtension extends Extension {
             'text-changed', () => this._onQueryChanged());
 
         this._shortcutChangedId = this._settings.connect(
-            `changed::${SUMMON_KEYBINDING}`, () => this._syncCustomShortcut());
-        this._syncCustomShortcut();
+            `changed::${SUMMON_KEYBINDING}`, () => this._bindShortcut());
+        this._bindShortcut();
 
         // The preferences window (ticket 12) writes to this schema from another process, so the
         // three preferences that change what the running shell does are observed here: the
@@ -196,6 +189,11 @@ export default class LumenExtension extends Extension {
         this._interfaceSettings = null;
         this._a11ySettings = null;
 
+        if (this._keybindingBound) {
+            Main.wm.removeKeybinding(SUMMON_KEYBINDING);
+            this._keybindingBound = false;
+        }
+
         if (this._watcherId) {
             Gio.bus_unwatch_name(this._watcherId);
             this._watcherId = 0;
@@ -216,36 +214,26 @@ export default class LumenExtension extends Extension {
         this._confirmation = null;
     }
 
-    // Keep the GNOME custom shortcut in step with the preference. It runs the installed CLI, which
-    // asks the daemon to emit ToggleRequested — the same path `lumen --toggle` takes by hand.
-    _syncCustomShortcut() {
-        const accelerator = this._settings?.get_string(SUMMON_KEYBINDING) ?? '';
+    // The summon keybinding. mutter only reads a keybinding from a string-array key, so
+    // `summon-shortcut` is `as` and holds exactly one accelerator here.
+    _bindShortcut() {
+        if (this._keybindingBound) {
+            Main.wm.removeKeybinding(SUMMON_KEYBINDING);
+            this._keybindingBound = false;
+        }
+
+        const [accelerator = ''] = this._settings?.get_strv(SUMMON_KEYBINDING) ?? [];
         if (!accelerator)
             return;
 
-        try {
-            const mediaKeys = new Gio.Settings({schema_id: MEDIA_KEYS_SCHEMA});
-            const binding = new Gio.Settings({
-                schema_id: CUSTOM_KEYBINDING_SCHEMA,
-                path: CUSTOM_KEYBINDING_PATH,
-            });
-            binding.set_string('name', 'Lumen');
-            binding.set_string('binding', accelerator);
-            binding.set_string('command', `${this._lumenCommand()} --toggle`);
-
-            const paths = mediaKeys.get_strv('custom-keybindings');
-            if (!paths.includes(CUSTOM_KEYBINDING_PATH))
-                mediaKeys.set_strv('custom-keybindings', [...paths, CUSTOM_KEYBINDING_PATH]);
-
-            log(`Lumen: summon shortcut registered as ${accelerator}`);
-        } catch (error) {
-            logError(error, 'Lumen: could not register the summon shortcut');
-        }
-    }
-
-    _lumenCommand() {
-        return GLib.find_program_in_path('lumen') ??
-            `${GLib.get_home_dir()}/.local/bin/lumen`;
+        const action = Main.wm.addKeybinding(
+            SUMMON_KEYBINDING,
+            this._settings,
+            Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
+            Shell.ActionMode.ALL,
+            () => this._toggleOverlay());
+        this._keybindingBound = action !== Meta.KeyBindingAction.NONE;
+        log(`Lumen: summon shortcut ${this._keybindingBound ? 'bound to' : 'NOT bound:'} ${accelerator}`);
     }
 
     // The `appearance` preference themes the overlay itself (system / light / dark). The launcher's

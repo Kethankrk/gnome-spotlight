@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
   <schema id="org.gnome.shell.extensions.lumen" path="/org/gnome/shell/extensions/lumen/">
-    <key name="summon-shortcut" type="s">
-      <default>'&lt;Control&gt;&lt;Alt&gt;space'</default>
+    <!-- mutter only reads `as` keys for add_keybinding: a string key registers an action with
+         zero accelerators and the shortcut silently never fires. -->
+    <key name="summon-shortcut" type="as">
+      <default>['&lt;Control&gt;&lt;Alt&gt;space']</default>
       <summary>Shortcut that summons Lumen (avoid Super/Ctrl+Space: the input method owns those)</summary>
     </key>
     <key name="appearance" type="s">

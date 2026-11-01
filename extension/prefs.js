@@ -267,7 +267,8 @@ export default class LumenPreferences extends ExtensionPreferences {
         if (this._capturing)
             return;
 
-        const value = this._settings.get_string(SUMMON_KEY);
+        // The key is a string array because that is what mutter reads for a keybinding.
+        const [value = ''] = this._settings.get_strv(SUMMON_KEY);
         this._shortcutLabel.accelerator = value;
 
         const clash = collides(value, {existing: this._taken});
@@ -373,7 +374,7 @@ export default class LumenPreferences extends ExtensionPreferences {
 
         // Writing is what the running extension listens for (`changed::summon-shortcut`), and the
         // signal handler is also what re-reads the button label and the collision warning.
-        this._settings.set_string(SUMMON_KEY, normalized);
+        this._settings.set_strv(SUMMON_KEY, [normalized]);
     }
 }
 

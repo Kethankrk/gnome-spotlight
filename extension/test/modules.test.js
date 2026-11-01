@@ -129,13 +129,16 @@ test('the extension applies preferences live, without a shell restart', () => {
     assert.match(read('overlay.js'), /setAppearance\(/);
 });
 
-test('the summon shortcut is a GNOME custom shortcut, not a display keybinding', () => {
+test('the summon shortcut is a display keybinding on a string-array key', () => {
     const extension = read('extension.js');
-    // `Main.wm.addKeybinding` is not delivered by this shell build, so the shortcut is a custom
-    // shortcut that runs the CLI (the documented fallback).
-    assert.doesNotMatch(extension, /addKeybinding/);
-    assert.match(extension, /custom-keybindings/);
-    assert.match(extension, /--toggle/);
+    assert.match(extension, /addKeybinding/);
+    assert.match(extension, /get_strv\(SUMMON_KEYBINDING\)/);
+
+    // mutter only reads `as` keys for add_keybinding: a string key registers an action with zero
+    // accelerators, and the shortcut then never fires (silently).
+    assert.match(read('schemas', `${SCHEMA_ID}.gschema.xml`),
+        /name="summon-shortcut" type="as"/);
+    assert.match(read('prefs.js'), /set_strv\(SUMMON_KEY/);
 });
 
 test('the activation path picks the action by modifier and runs the shell actions it is handed', () => {
