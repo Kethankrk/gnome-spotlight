@@ -2,6 +2,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
+import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -15,6 +16,7 @@ import {createNavigator} from './lib/navigation.js';
 import {DEFAULT_PAGE_SIZE, intentFor} from './lib/keys.js';
 import {appCandidates, appIdFromResultId} from './lib/apps.js';
 import {resultsFromRows, unpack} from './lib/wire.js';
+import {createClipboardSampler, shouldCapture, SAMPLE_INTERVAL_SECONDS} from './lib/clipboard.js';
 
 const SUMMON_KEYBINDING = 'summon-shortcut';
 const PROVIDERS_KEY = 'providers-enabled';
@@ -34,6 +36,9 @@ export default class LumenExtension extends Extension {
         this._results = [];
         this._navigator = null;
         this._apps = null;
+        this._clipboard = St.Clipboard.get_default();
+        this._sampler = createClipboardSampler();
+        this._captureTimerId = 0;
 
         this._overlay = new LumenOverlay({
             onActivate: index => this._onRowActivated(index),
@@ -58,6 +63,8 @@ export default class LumenExtension extends Extension {
 
     disable() {
         this._shutdown = true;
+
+        this._stopClipboardCapture();
 
         if (this._overlay && this._textChangedId) {
             this._overlay.entry.clutter_text.disconnect(this._textChangedId);
@@ -86,6 +93,8 @@ export default class LumenExtension extends Extension {
         this._navigator = null;
         this._results = [];
         this._apps = null;
+        this._clipboard = null;
+        this._sampler = null;
     }
 
     _bindShortcut() {
@@ -155,6 +164,8 @@ export default class LumenExtension extends Extension {
             proxy.connect('g-signal', (_proxy, _sender, signalName, parameters) => {
                 if (signalName === 'ResultsChanged')
                     this._onResultsChanged(parameters);
+                else if (signalName === 'ClipboardChanged')
+                    this._onClipboardChanged();
             }),
         ];
         this._readVersion();
@@ -186,6 +197,7 @@ export default class LumenExtension extends Extension {
             log(`Lumen: engine ${state.status} (${state.message})`);
 
         this._overlay?.setEngineState(state);
+        this._syncClipboardCapture();
 
         if (state.status !== EngineStatus.OK)
             this._render([]);
@@ -202,6 +214,78 @@ export default class LumenExtension extends Extension {
         this._proxySignals = [];
         this._activeSearch = null;
         this._awaitingResults = false;
+        this._syncClipboardCapture();
+    }
+
+    // Clipboard capture. The spec calls for St.Clipboard's `owner-changed` signal, which GNOME 50's
+    // St does not have (no StClipboard signals are registered at all), so the clipboard is sampled
+    // on a timer while — and only while — the engine says history is on.
+    _clipboardEnabled() {
+        return this._proxy?.get_cached_property('ClipboardEnabled')?.deep_unpack() === true;
+    }
+
+    _syncClipboardCapture() {
+        const wanted = shouldCapture({
+            enabled: this._clipboardEnabled(),
+            engineReady: this._engine.status === EngineStatus.OK && this._proxy !== null,
+        });
+
+        if (wanted && !this._captureTimerId) {
+            this._captureTimerId = GLib.timeout_add_seconds(
+                GLib.PRIORITY_DEFAULT,
+                SAMPLE_INTERVAL_SECONDS,
+                () => {
+                    this._sampleClipboard();
+                    return GLib.SOURCE_CONTINUE;
+                });
+        } else if (!wanted && this._captureTimerId) {
+            this._stopClipboardCapture();
+        }
+    }
+
+    _stopClipboardCapture() {
+        if (!this._captureTimerId)
+            return;
+
+        GLib.source_remove(this._captureTimerId);
+        this._captureTimerId = 0;
+        this._sampler?.reset();
+    }
+
+    _sampleClipboard() {
+        if (this._shutdown || !this._clipboard)
+            return;
+
+        this._clipboard.get_text(St.ClipboardType.CLIPBOARD, (_clipboard, text) => {
+            if (this._shutdown)
+                return;
+
+            const payload = this._sampler?.sample(text ?? '', Date.now());
+            if (payload)
+                this._pushClipboard(payload);
+        });
+    }
+
+    _pushClipboard(payload) {
+        if (!this._proxy)
+            return;
+
+        const call = new GLib.Variant('(st)', [payload.text, payload.timestamp]);
+        this._proxy.call('ClipboardPush', call, Gio.DBusCallFlags.NONE, -1, null, (_proxy, result) => {
+            try {
+                _proxy.call_finish(result);
+            } catch (error) {
+                logError(error, 'Lumen: the engine refused the clipboard entry');
+            }
+        });
+    }
+
+    // A new copy is a new result: an open list re-runs the query so it is on screen.
+    _onClipboardChanged() {
+        if (!this._overlay?.isOpen || this._overlay.entry.get_text() === '')
+            return;
+
+        this._onQueryChanged();
     }
 
     // The query pipeline: shell-owned candidates go to the daemon, which ranks them with its own.

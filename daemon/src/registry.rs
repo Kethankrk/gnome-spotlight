@@ -7,8 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::index;
 use crate::protocol::{ResultItem, CAPABILITY_IDS, PROVIDER_IDS};
-use crate::providers::{calculator::Calculator, files, Provider, QueryRequest, Stub};
+use crate::providers::calculator::Calculator;
+use crate::providers::clipboard::{self, ClipboardProvider};
+use crate::providers::{files, Provider, QueryRequest, Stub};
 use crate::ranking;
+use crate::store::clipboard::ClipboardStore;
 
 /// How the daemon reaches the file index. The index is behind its own seam so that the daemon
 /// can run, and its tests can run, on a machine without an index.
@@ -29,20 +32,20 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The registry a daemon runs: every provider present, with `files` backed by whichever index
-    /// the configuration selected, the calculator wired to its real implementation, and the rest
-    /// still stubs until their ticket lands.
+    /// The registry the daemon serves: every provider present, `files` backed by whichever index
+    /// the configuration selected, the calculator real, the clipboard sharing `clipboard`, and
+    /// the rest still stubs until their ticket lands.
     ///
     /// Building it opens the index, which for `LocalSearch` means loading the library and probing
     /// the endpoint on this thread — before the bus name is owned, so the capability is right
     /// before the first client can ask. Later queries run on the search thread (see `dbus.rs`).
-    pub fn new(indexer: &Indexer) -> Self {
+    pub fn new(indexer: &Indexer, clipboard: Arc<ClipboardStore>) -> Self {
         let index = index::open(indexer);
         let providers: Vec<Box<dyn Provider>> = vec![
             Box::new(Stub::new("applications", false)),
             Box::new(files::Files::new(Arc::clone(&index))),
             Box::new(Stub::new("recent", false)),
-            Box::new(Stub::new("clipboard", false)),
+            Box::new(ClipboardProvider::new(Arc::clone(&clipboard))),
             Box::new(Calculator::new()),
             Box::new(Stub::new("actions", false)),
             Box::new(Stub::new("settings", false)),
@@ -55,6 +58,11 @@ impl Registry {
         );
 
         Self { providers }
+    }
+
+    /// A registry with a fresh, empty clipboard history. Convenient for tests.
+    pub fn with_stubs(indexer: &Indexer) -> Self {
+        Self::new(indexer, Arc::new(ClipboardStore::new()))
     }
 
     /// The provider ids the daemon knows, in contract order.
@@ -130,23 +138,29 @@ mod tests {
 
     #[test]
     fn the_registry_lists_all_eight_providers() {
-        let registry = Registry::new(&Indexer::None);
+        let registry = Registry::with_stubs(&Indexer::None);
         assert_eq!(registry.ids(), PROVIDER_IDS.to_vec());
     }
 
     #[test]
     fn capabilities_omit_what_is_not_available() {
-        let without_index = Registry::new(&Indexer::None);
+        let without_index = Registry::with_stubs(&Indexer::None);
         assert_eq!(
             without_index.capabilities(),
-            vec!["calculator".to_string(), "websearch".to_string()]
+            vec![
+                "clipboard".to_string(),
+                "calculator".to_string(),
+                "websearch".to_string()
+            ],
+            "the clipboard provider is always there; without an indexer files is not"
         );
 
-        let with_index = Registry::new(&Indexer::Fake { seed: None });
+        let with_index = Registry::with_stubs(&Indexer::Fake { seed: None });
         assert_eq!(
             with_index.capabilities(),
             vec![
                 "files".to_string(),
+                "clipboard".to_string(),
                 "calculator".to_string(),
                 "websearch".to_string()
             ]
@@ -155,7 +169,7 @@ mod tests {
 
     #[test]
     fn an_empty_index_contributes_no_results() {
-        let registry = Registry::new(&Indexer::Fake { seed: None });
+        let registry = Registry::with_stubs(&Indexer::Fake { seed: None });
         let request = QueryRequest::new("nautilus", vec!["files".to_string()]);
         assert!(registry.query(&request).is_empty());
     }
@@ -172,7 +186,7 @@ mod tests {
         )
         .expect("write a seed");
 
-        let registry = Registry::new(&Indexer::Fake {
+        let registry = Registry::with_stubs(&Indexer::Fake {
             seed: Some(seed.clone()),
         });
         let results = registry.query(&QueryRequest::new("report", vec!["files".to_string()]));
@@ -186,7 +200,7 @@ mod tests {
 
     #[test]
     fn without_an_index_the_extensions_own_results_still_rank() {
-        let registry = Registry::new(&Indexer::None);
+        let registry = Registry::with_stubs(&Indexer::None);
         let app = ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files");
         let request =
             QueryRequest::new("files", vec!["applications".to_string(), "files".to_string()])
@@ -198,10 +212,28 @@ mod tests {
     }
 
     #[test]
-    fn an_expression_scores_the_calculators_base_weight_and_is_alone() {
-        let registry = Registry::new(&Indexer::None);
+    fn the_registry_serves_the_shared_clipboard_history() {
+        let store = Arc::new(ClipboardStore::new());
+        let registry = Registry::new(&Indexer::None, Arc::clone(&store));
+        let request = QueryRequest::new("example", vec!["clipboard".to_string()]);
 
-        let results = registry.query_at(&QueryRequest::new("2 + 2", Vec::new()), 0);
+        let disabled = registry.query(&request);
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].id, clipboard::DISABLED_ID);
+
+        store.set_enabled(true);
+        store.push("https://example.com/pricing", 1_000);
+        let enabled = registry.query(&request);
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].title, "https://example.com/pricing");
+        assert!(enabled[0].score > 0.0, "the registry scores every result");
+    }
+
+    #[test]
+    fn an_expression_scores_the_calculators_base_weight_and_is_alone() {
+        let registry = Registry::with_stubs(&Indexer::None);
+
+        let results = registry.query_at(&QueryRequest::new("2 + 2", vec!["calculator".to_string()]), 0);
         assert_eq!(results.len(), 1, "one candidate, and no error row");
         assert_eq!(results[0].provider, "calculator");
         assert_eq!(results[0].id, "calc:2 + 2");
@@ -214,11 +246,11 @@ mod tests {
 
     #[test]
     fn a_query_that_is_not_an_expression_leaves_the_calculator_silent() {
-        let registry = Registry::new(&Indexer::None);
+        let registry = Registry::with_stubs(&Indexer::None);
         for text in ["nautilus", "2 +", "abc 123", "10 km"] {
             assert!(
                 registry
-                    .query_at(&QueryRequest::new(text, Vec::new()), 0)
+                    .query_at(&QueryRequest::new(text, vec!["calculator".to_string()]), 0)
                     .is_empty(),
                 "`{text}` must produce nothing"
             );
@@ -227,9 +259,13 @@ mod tests {
 
     #[test]
     fn an_injected_application_does_not_outrank_a_recognised_expression() {
-        let registry = Registry::new(&Indexer::None);
+        let registry = Registry::with_stubs(&Indexer::None);
         let app = ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files");
-        let request = QueryRequest::new("2 + 2", Vec::new()).with_injected(vec![app]);
+        let request = QueryRequest::new(
+            "2 + 2",
+            vec!["calculator".to_string(), "applications".to_string()],
+        )
+        .with_injected(vec![app]);
 
         let results = registry.query_at(&request, 0);
         assert_eq!(results.len(), 2);

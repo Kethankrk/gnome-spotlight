@@ -5,6 +5,7 @@
 //! fakes here instead of standing up LocalSearch or a clipboard store.
 
 pub mod calculator;
+pub mod clipboard;
 pub mod files;
 
 use crate::protocol::ResultItem;

@@ -5,7 +5,7 @@
 //! thread does provider work.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
@@ -14,8 +14,10 @@ use zbus::object_server::SignalEmitter;
 use zbus::{interface, Connection, OwnedVariant};
 
 use crate::protocol::{self, ResultItem, Rows};
+use crate::providers::clipboard::entry_row;
 use crate::providers::QueryRequest;
 use crate::registry::{Indexer, Registry};
+use crate::store::clipboard::ClipboardStore;
 
 /// Everything the daemon needs to serve its side of the contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +57,8 @@ pub struct Engine {
     registry: Arc<Registry>,
     jobs: mpsc::Sender<SearchJob>,
     issued: Arc<AtomicU64>,
-    clipboard_enabled: AtomicBool,
+    /// The one clipboard history, shared with the clipboard provider inside the registry.
+    clipboard: Arc<ClipboardStore>,
 }
 
 #[interface(name = "org.gnome.Lumen.Engine")]
@@ -72,14 +75,16 @@ impl Engine {
         self.registry.capabilities()
     }
 
+    /// Whether copies are being recorded. The property and `ClipboardSetEnabled` act on the same
+    /// store, so either spelling of "turn it on" works (contract §2).
     #[zbus(property)]
     fn clipboard_enabled(&self) -> bool {
-        self.clipboard_enabled.load(Ordering::Relaxed)
+        self.clipboard.is_enabled()
     }
 
     #[zbus(property)]
     fn set_clipboard_enabled(&self, enabled: bool) {
-        self.clipboard_enabled.store(enabled, Ordering::Relaxed);
+        self.clipboard.set_enabled(enabled);
     }
 
     /// Start a search and return its id. Results arrive as signals.
@@ -128,11 +133,79 @@ impl Engine {
         emitter: &SignalEmitter<'_>,
         search_id: String,
     ) -> zbus::Result<()>;
+
+    // ---- Clipboard history (ticket 10; memory-only, persistence is ticket 11). ----
+
+    /// Record one copied text. `false` while history is off or for empty text, so a caller can tell
+    /// "not recorded" from "recorded" without an error.
+    async fn clipboard_push(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        text: String,
+        timestamp_ms: u64,
+    ) -> bool {
+        let recorded = self.clipboard.push(&text, timestamp_of(timestamp_ms));
+        if recorded {
+            let _ = emitter.clipboard_changed().await;
+        }
+        recorded
+    }
+
+    /// The history, newest first, as contract §3 rows. Empty while history is off (contract §9).
+    fn clipboard_list(&self) -> Rows {
+        self.clipboard
+            .list()
+            .iter()
+            .map(|entry| entry_row(entry).row())
+            .collect()
+    }
+
+    /// Drop one entry by id. `false` when no entry has that id.
+    async fn clipboard_delete(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        id: String,
+    ) -> bool {
+        let deleted = self.clipboard.delete(&id);
+        if deleted {
+            let _ = emitter.clipboard_changed().await;
+        }
+        deleted
+    }
+
+    /// Drop the whole history.
+    async fn clipboard_clear(&self, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) {
+        self.clipboard.clear();
+        let _ = emitter.clipboard_changed().await;
+    }
+
+    /// Turn recording on or off. Same store as the `ClipboardEnabled` property, so the property is
+    /// republished here as well.
+    async fn clipboard_set_enabled(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        enabled: bool,
+    ) {
+        self.clipboard.set_enabled(enabled);
+        let _ = self.clipboard_enabled_changed(&emitter).await;
+        let _ = emitter.clipboard_changed().await;
+    }
+
+    /// Emitted whenever the history changes: a recorded copy, a delete, a clear, or history being
+    /// switched on or off.
+    #[zbus(signal)]
+    async fn clipboard_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+}
+
+/// Contract `t` is unsigned; the store keeps a signed millisecond stamp for the scorer.
+fn timestamp_of(timestamp_ms: u64) -> i64 {
+    i64::try_from(timestamp_ms).unwrap_or(i64::MAX)
 }
 
 /// Own `config.dbus_name`, export the engine and start the search thread.
 pub async fn serve(config: Config) -> zbus::Result<Serving> {
-    let registry = Arc::new(Registry::new(&config.indexer));
+    let clipboard = Arc::new(ClipboardStore::new());
+    let registry = Arc::new(Registry::new(&config.indexer, Arc::clone(&clipboard)));
     let issued = Arc::new(AtomicU64::new(0));
     let (jobs_tx, jobs_rx) = mpsc::channel();
 
@@ -140,7 +213,7 @@ pub async fn serve(config: Config) -> zbus::Result<Serving> {
         registry: Arc::clone(&registry),
         jobs: jobs_tx,
         issued: Arc::clone(&issued),
-        clipboard_enabled: AtomicBool::new(false),
+        clipboard,
     };
 
     let name = config.dbus_name.clone();

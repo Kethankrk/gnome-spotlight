@@ -44,8 +44,8 @@ impl Harness {
         Self::start(extra, true, &[])
     }
 
-    /// The same, with environment variables set on the daemon — how a test selects a library
-    /// path or a home directory the daemon must see.
+    /// Extra arguments and extra environment (e.g. a throw-away `HOME`) together, under a unique
+    /// test name.
     pub fn spawn_with_env(extra: &[&str], env: &[(&str, &str)]) -> Self {
         Self::start(extra, true, env)
     }
@@ -85,6 +85,7 @@ impl Harness {
             .arg("--object-path")
             .arg(OBJECT_PATH)
             .env("DBUS_SESSION_BUS_ADDRESS", &address)
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -92,9 +93,6 @@ impl Harness {
             command.arg("--dbus-name").arg(&name);
         }
         command.args(extra);
-        for (key, value) in env {
-            command.env(key, value);
-        }
 
         let mut daemon = command.spawn().expect("spawn lumen-daemon");
         wait_for_ready(&mut daemon, &name);
