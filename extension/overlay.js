@@ -57,11 +57,12 @@ export class LumenOverlay {
         this._shouldAnimate = true;
         this._highContrast = false;
 
+        // `spacing` is a CSS property on St.BoxLayout (the GObject property was removed in
+        // GNOME 48); `.lumen-card` in the stylesheet carries it.
         this._card = new St.BoxLayout({
             style_class: 'lumen-card',
             vertical: true,
             reactive: true,
-            spacing: 4,
         });
         // A modal search surface for a screen reader: the card is the thing that appeared, and
         // everything below it hangs off it.
@@ -475,7 +476,6 @@ export class LumenOverlay {
             x_expand: true,
             reactive: true,
             track_hover: true,
-            spacing: 10,
         });
 
         // The row is what a reader lands on, so it carries the list-item role and a name built

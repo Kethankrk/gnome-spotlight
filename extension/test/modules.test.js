@@ -167,6 +167,18 @@ test('result-limit is sent and PageDown asks for the next page of files', () => 
     assert.match(read('lib', 'viewmodel.js'), /caps\?\.\[provider\]/);
 });
 
+test('the shell glue sets no removed St properties (`spacing` is CSS-only)', () => {
+    // GNOME 48 removed the `spacing` GObject property from St.BoxLayout — setting it throws
+    // "no property spacing on StBoxLayout" and the whole extension fails to load. It is a CSS
+    // property now, so it belongs in the stylesheet and nowhere in the JS.
+    assert.doesNotMatch(read('overlay.js'), /\bspacing\s*:/,
+        'overlay.js sets `spacing` as a JS property; St reads it from the stylesheet');
+
+    const css = read('stylesheet.css');
+    assert.match(css, /\.lumen-card\s*\{[^}]*spacing:/s, '.lumen-card needs its spacing in CSS');
+    assert.match(css, /\.lumen-row\s*\{[^}]*spacing:/s, '.lumen-row needs its spacing in CSS');
+});
+
 test('the stylesheet themes the overlay for a light and a dark card', () => {
     const css = read('stylesheet.css');
     for (const name of ['lumen-appearance-light', 'lumen-appearance-dark'])

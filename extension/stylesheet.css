@@ -12,6 +12,7 @@
     border-radius: 18px;
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
     padding: 14px 18px 10px 18px;
+    spacing: 4px;
 }
 
 .lumen-entry {
@@ -57,6 +58,7 @@
 .lumen-row {
     border-radius: 10px;
     padding: 6px 8px;
+    spacing: 10px;
 }
 
 .lumen-row-selected {
