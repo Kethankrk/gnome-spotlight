@@ -615,7 +615,10 @@ export default class LumenExtension extends Extension {
         }
 
         const options = {
-            injected: variantsOf(injected),
+            // `injected` is an `aa{sv}`, so it must be a variant: a bare JS array makes the packer
+            // throw ("not a subclass of GObject_Struct, it's a Array") before Query is even sent,
+            // which leaves the overlay with no results at all.
+            injected: new GLib.Variant('aa{sv}', variantsOf(injected)),
             limit: new GLib.Variant('u', clampResultLimit(this._settings?.get_int(RESULT_LIMIT_KEY))),
         };
         if (offset > 0)
