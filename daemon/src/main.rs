@@ -13,13 +13,17 @@ Usage: lumen-daemon [OPTIONS]
 Options:
       --dbus-name <NAME>    well-known session bus name to own [default: org.gnome.Lumen]
       --object-path <PATH>  object path to export the engine at [default: /org/gnome/Lumen]
-      --indexer <SPEC>      none | fake[:<seed-file>]  [default: none]
+      --indexer <SPEC>      none | fake[:<seed-file>] | localsearch  [default: none]
   -h, --help                print this help
   -V, --version             print the version
 
 Environment:
   DBUS_SESSION_BUS_ADDRESS  the bus to serve on
   LUMEN_FAKE_INDEX          seed file for `--indexer fake` when the flag is not given
+  LUMEN_TINYSPARQL_LIB      library path for `--indexer localsearch` (testing seam)
+
+The installer passes `--indexer localsearch` so the daemon searches the system's file index;
+without it the daemon serves every other provider and reports no `files` capability.
 ";
 
 /// The test harness and the packaging unit both need to know when the name is ours; the readiness
@@ -124,6 +128,15 @@ fn parse_args(args: &[String]) -> Result<Outcome, String> {
         }
     }
 
+    if let Indexer::Fake { seed: Some(seed) } = &config.indexer {
+        if !seed.is_file() {
+            return Err(format!(
+                "the fake index seed {} is not a readable file",
+                seed.display()
+            ));
+        }
+    }
+
     if !config.object_path.starts_with('/') {
         return Err(format!("`{}` is not an object path", config.object_path));
     }
@@ -135,6 +148,7 @@ fn parse_indexer(spec: &str) -> Result<Indexer, String> {
     match spec.split_once(':') {
         None if spec == "none" => Ok(Indexer::None),
         None if spec == "fake" => Ok(Indexer::Fake { seed: None }),
+        None if spec == "localsearch" || spec == "tinysparql" => Ok(Indexer::LocalSearch),
         None => Err(format!("unknown indexer `{spec}`")),
         Some((kind, seed)) if kind == "fake" => Ok(Indexer::Fake {
             seed: Some(PathBuf::from(seed)),
@@ -226,18 +240,37 @@ mod tests {
 
     #[test]
     fn the_indexer_spec_selects_the_seam() {
+        let seed = std::env::temp_dir().join(format!("lumen-main-seed-{}.json", std::process::id()));
+        std::fs::write(&seed, r#"{"files": []}"#).expect("write a seed");
+
         assert_eq!(run_config(&["--indexer", "none"]).indexer, Indexer::None);
         assert_eq!(
             run_config(&["--indexer=fake"]).indexer,
             Indexer::Fake { seed: None }
         );
         assert_eq!(
-            run_config(&["--indexer", "fake:/tmp/seed.json"]).indexer,
+            run_config(&["--indexer", &format!("fake:{}", seed.display())]).indexer,
             Indexer::Fake {
-                seed: Some(PathBuf::from("/tmp/seed.json"))
+                seed: Some(seed.clone())
             }
         );
-        assert!(parse_args(&args(&["--indexer", "localsearch"])).is_err());
+        assert_eq!(
+            run_config(&["--indexer", "localsearch"]).indexer,
+            Indexer::LocalSearch,
+            "the installer selects the real index"
+        );
+        assert_eq!(
+            run_config(&["--indexer", "tinysparql"]).indexer,
+            Indexer::LocalSearch
+        );
+
+        assert!(parse_args(&args(&["--indexer", "woof"])).is_err());
+        assert!(
+            parse_args(&args(&["--indexer", "fake:/nonexistent/seed.json"])).is_err(),
+            "a seed that cannot be read must fail at startup, not silently search nothing"
+        );
+
+        std::fs::remove_file(&seed).ok();
     }
 
     #[test]

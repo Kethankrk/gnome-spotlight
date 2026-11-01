@@ -85,7 +85,8 @@ impl Engine {
     /// Start a search and return its id. Results arrive as signals.
     ///
     /// `options["injected"]` carries candidate results the extension computed itself; they are
-    /// merged with the daemon's providers and ranked together.
+    /// merged with the daemon's providers and ranked together. `options["limit"]` and
+    /// `options["offset"]` page the daemon's own paging providers (contract §2, §11).
     fn query(
         &self,
         text: String,
@@ -99,13 +100,17 @@ impl Engine {
             .iter()
             .filter_map(ResultItem::from_row)
             .collect();
+        let limit = protocol::option_usize(&options, protocol::OPTION_LIMIT);
+        let offset = protocol::option_usize(&options, protocol::OPTION_OFFSET).unwrap_or(0);
 
         let number = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
         let id = format!("s{number}");
         let job = SearchJob {
             number,
             id: id.clone(),
-            request: QueryRequest::new(text, enabled_providers).with_injected(injected),
+            request: QueryRequest::new(text, enabled_providers)
+                .with_injected(injected)
+                .with_paging(limit, offset),
         };
         let _ = self.jobs.send(job);
         id
@@ -127,7 +132,7 @@ impl Engine {
 
 /// Own `config.dbus_name`, export the engine and start the search thread.
 pub async fn serve(config: Config) -> zbus::Result<Serving> {
-    let registry = Arc::new(Registry::with_stubs(&config.indexer));
+    let registry = Arc::new(Registry::new(&config.indexer));
     let issued = Arc::new(AtomicU64::new(0));
     let (jobs_tx, jobs_rx) = mpsc::channel();
 
