@@ -2,11 +2,14 @@
 //! turns a [`QueryRequest`] into results.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::protocol::{ResultItem, CAPABILITY_IDS, PROVIDER_IDS};
+use crate::providers::clipboard::{self, ClipboardProvider};
 use crate::providers::{Provider, QueryRequest, Stub};
 use crate::ranking;
+use crate::store::clipboard::ClipboardStore;
 
 /// How the daemon reaches LocalSearch/TinySPARQL. The indexer is behind its own seam so that the
 /// daemon can run, and its tests can run, on a machine without an index.
@@ -30,13 +33,24 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The registry a ticket-01 daemon runs: every provider present, none of them wired up yet.
+    /// The registry a ticket-01 daemon runs: the clipboard provider wired to a fresh, empty
+    /// history, every other provider still a stub.
     pub fn with_stubs(indexer: &Indexer) -> Self {
+        Self::new(indexer, Arc::new(ClipboardStore::new()))
+    }
+
+    /// The registry the daemon actually serves, sharing one clipboard history with its D-Bus
+    /// interface.
+    pub fn new(indexer: &Indexer, clipboard: Arc<ClipboardStore>) -> Self {
         let providers = PROVIDER_IDS
             .iter()
             .map(|id| {
-                let available = is_available(id, indexer);
-                Box::new(Stub::new(id, available)) as Box<dyn Provider>
+                if *id == clipboard::PROVIDER_ID {
+                    Box::new(ClipboardProvider::new(Arc::clone(&clipboard))) as Box<dyn Provider>
+                } else {
+                    let available = is_available(id, indexer);
+                    Box::new(Stub::new(id, available)) as Box<dyn Provider>
+                }
             })
             .collect();
 
@@ -108,6 +122,8 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether the *stub* provider with this id can answer. Providers that have landed (the clipboard)
+/// decide for themselves, so they never appear here.
 fn is_available(id: &str, indexer: &Indexer) -> bool {
     match id {
         "files" => indexer.available(),
@@ -131,7 +147,12 @@ mod tests {
         let without_index = Registry::with_stubs(&Indexer::None);
         assert_eq!(
             without_index.capabilities(),
-            vec!["calculator".to_string(), "websearch".to_string()]
+            vec![
+                "clipboard".to_string(),
+                "calculator".to_string(),
+                "websearch".to_string()
+            ],
+            "the clipboard provider is always there; without an indexer files is not"
         );
 
         let with_index = Registry::with_stubs(&Indexer::Fake { seed: None });
@@ -139,6 +160,7 @@ mod tests {
             with_index.capabilities(),
             vec![
                 "files".to_string(),
+                "clipboard".to_string(),
                 "calculator".to_string(),
                 "websearch".to_string()
             ]
@@ -150,6 +172,24 @@ mod tests {
         let registry = Registry::with_stubs(&Indexer::Fake { seed: None });
         let request = QueryRequest::new("nautilus", vec!["files".to_string()]);
         assert!(registry.query(&request).is_empty());
+    }
+
+    #[test]
+    fn the_registry_serves_the_shared_clipboard_history() {
+        let store = Arc::new(ClipboardStore::new());
+        let registry = Registry::new(&Indexer::None, Arc::clone(&store));
+        let request = QueryRequest::new("example", vec!["clipboard".to_string()]);
+
+        let disabled = registry.query(&request);
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].id, clipboard::DISABLED_ID);
+
+        store.set_enabled(true);
+        store.push("https://example.com/pricing", 1_000);
+        let enabled = registry.query(&request);
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].title, "https://example.com/pricing");
+        assert!(enabled[0].score > 0.0, "the registry scores every result");
     }
 
     #[test]

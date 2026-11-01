@@ -4,6 +4,8 @@
 //! the ones the extension computes and injects — is reached through [`Provider`]. Tests inject
 //! fakes here instead of standing up LocalSearch or a clipboard store.
 
+pub mod clipboard;
+
 use crate::protocol::ResultItem;
 
 /// What a provider is asked for.

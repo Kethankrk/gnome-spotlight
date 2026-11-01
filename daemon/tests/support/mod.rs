@@ -40,16 +40,21 @@ impl Harness {
     }
 
     pub fn spawn_with_args(extra: &[&str]) -> Self {
-        Self::start(extra, true)
+        Self::start(&[], extra, true)
+    }
+
+    /// A daemon with extra environment (e.g. a throw-away `HOME`) under a unique test name.
+    pub fn spawn_with_env(env: &[(&str, &str)]) -> Self {
+        Self::start(env, &[], true)
     }
 
     /// A daemon owning the real well-known name, always on a bus of its own so that it cannot
     /// race another test for it.
     pub fn spawn_with_default_name() -> Self {
-        Self::start(&[], false)
+        Self::start(&[], &[], false)
     }
 
-    fn start(extra: &[&str], unique_name: bool) -> Self {
+    fn start(env: &[(&str, &str)], extra: &[&str], unique_name: bool) -> Self {
         let (bus, address) = if unique_name {
             match std::env::var("DBUS_SESSION_BUS_ADDRESS") {
                 Ok(address) => (None, address),
@@ -78,6 +83,7 @@ impl Harness {
             .arg("--object-path")
             .arg(OBJECT_PATH)
             .env("DBUS_SESSION_BUS_ADDRESS", &address)
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

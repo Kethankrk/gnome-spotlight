@@ -9,6 +9,7 @@ pub mod protocol;
 pub mod providers;
 pub mod ranking;
 pub mod registry;
+pub mod store;
 
 pub use dbus::{serve, Config, Serving};
 pub use registry::{Indexer, Registry};
