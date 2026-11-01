@@ -12,6 +12,7 @@ use crate::providers::clipboard::{self, ClipboardProvider};
 use crate::providers::{files, Provider, QueryRequest, Stub};
 use crate::ranking;
 use crate::store::clipboard::ClipboardStore;
+use crate::store::usage::UsageStore;
 
 /// How the daemon reaches the file index. The index is behind its own seam so that the daemon
 /// can run, and its tests can run, on a machine without an index.
@@ -29,6 +30,8 @@ pub enum Indexer {
 
 pub struct Registry {
     providers: Vec<Box<dyn Provider>>,
+    /// What the user has been activating, keyed by result id (contract §5's usage term).
+    usage: Arc<UsageStore>,
 }
 
 impl Registry {
@@ -39,7 +42,20 @@ impl Registry {
     /// Building it opens the index, which for `LocalSearch` means loading the library and probing
     /// the endpoint on this thread — before the bus name is owned, so the capability is right
     /// before the first client can ask. Later queries run on the search thread (see `dbus.rs`).
+    ///
+    /// Usage-based ranking comes from [`Registry::with_usage`]; this constructor is for callers
+    /// with nothing to remember (tests and one-off builds).
     pub fn new(indexer: &Indexer, clipboard: Arc<ClipboardStore>) -> Self {
+        Self::with_usage(indexer, clipboard, Arc::new(UsageStore::new()))
+    }
+
+    /// [`Registry::new`] with the usage counters the daemon learns from, so the results the user
+    /// activates most rank higher (contract §5, ticket 13).
+    pub fn with_usage(
+        indexer: &Indexer,
+        clipboard: Arc<ClipboardStore>,
+        usage: Arc<UsageStore>,
+    ) -> Self {
         let index = index::open(indexer);
         let providers: Vec<Box<dyn Provider>> = vec![
             Box::new(Stub::new("applications", false)),
@@ -57,7 +73,7 @@ impl Registry {
             "the registry lists the providers in contract order"
         );
 
-        Self { providers }
+        Self { providers, usage }
     }
 
     /// A registry with a fresh, empty clipboard history. Convenient for tests.
@@ -108,6 +124,9 @@ impl Registry {
         );
 
         for item in &mut items {
+            // What the user has been choosing weights the score (contract §5), so the counters are
+            // read before the scorer runs, never after.
+            item.usage = self.usage.count(&item.id);
             item.score = ranking::score(item, &request.text, now_ms);
         }
 
@@ -284,5 +303,87 @@ mod tests {
         let all = QueryRequest::new("x", Vec::new());
         assert!(all.wants("files"));
         assert!(all.wants("calculator"));
+    }
+
+    #[test]
+    fn activations_recorded_in_the_usage_store_promote_a_result() {
+        let usage = Arc::new(UsageStore::new());
+        let registry = Registry::with_usage(
+            &Indexer::None,
+            Arc::new(ClipboardStore::new()),
+            Arc::clone(&usage),
+        );
+
+        let candidates = || {
+            vec![
+                ResultItem::new("applications", "app:org.gnome.Notes.desktop", "Notes"),
+                ResultItem::new("files", "file:/home/me/notes-old", "notes-old"),
+            ]
+        };
+        let request = || {
+            QueryRequest::new(
+                "note",
+                vec!["applications".to_string(), "files".to_string()],
+            )
+            .with_injected(candidates())
+        };
+
+        let before = registry.query_at(&request(), 0);
+        assert_eq!(
+            before[0].provider, "applications",
+            "the app's heavier base weight wins first: {before:?}"
+        );
+
+        for _ in 0..20 {
+            usage.record("file:/home/me/notes-old");
+        }
+
+        let after = registry.query_at(&request(), 0);
+        assert_eq!(after[0].id, "file:/home/me/notes-old");
+        assert_eq!(after[0].usage, 20, "the count reached the candidate");
+        assert_eq!(after[1].usage, 0, "an untouched result scores without a bonus");
+        assert!(
+            (after[0].score - 1.20).abs() < 1e-9,
+            "files 0.20 + prefix 0.8 + usage 0.20, got {}",
+            after[0].score
+        );
+        assert!(
+            (after[1].score - 1.10).abs() < 1e-9,
+            "applications 0.30 + prefix 0.8, got {}",
+            after[1].score
+        );
+    }
+
+    #[test]
+    fn an_exact_match_outranks_a_loosely_matching_result_however_often_it_is_used() {
+        let usage = Arc::new(UsageStore::new());
+        let registry = Registry::with_usage(
+            &Indexer::None,
+            Arc::new(ClipboardStore::new()),
+            Arc::clone(&usage),
+        );
+
+        // The file matches only at a word start, and is used far past the scorer's cap.
+        for _ in 0..50 {
+            usage.record("file:/home/me/My Files Backup");
+        }
+
+        let request = QueryRequest::new(
+            "files",
+            vec!["applications".to_string(), "files".to_string()],
+        )
+        .with_injected(vec![
+            ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files"),
+            ResultItem::new("files", "file:/home/me/My Files Backup", "My Files Backup"),
+        ]);
+
+        let results = registry.query_at(&request, 0);
+        assert_eq!(results[0].provider, "applications");
+        assert!((results[0].score - 1.30).abs() < 1e-9);
+        assert!(
+            (results[1].score - 1.00).abs() < 1e-9,
+            "0.20 + 0.6 + the capped 0.20 bonus, got {}",
+            results[1].score
+        );
     }
 }

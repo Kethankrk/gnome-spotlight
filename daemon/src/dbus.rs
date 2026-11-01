@@ -11,13 +11,14 @@ use std::thread;
 
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
 use zbus::object_server::SignalEmitter;
-use zbus::{interface, Connection, OwnedVariant};
+use zbus::{interface, Connection, OwnedVariant, Variant};
 
-use crate::protocol::{self, ResultItem, Rows};
+use crate::protocol::{self, ResultItem, Row, Rows};
 use crate::providers::clipboard::entry_row;
 use crate::providers::QueryRequest;
 use crate::registry::{Indexer, Registry};
 use crate::store::clipboard::ClipboardStore;
+use crate::store::usage::UsageStore;
 
 /// Everything the daemon needs to serve its side of the contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,8 @@ pub struct Engine {
     issued: Arc<AtomicU64>,
     /// The one clipboard history, shared with the clipboard provider inside the registry.
     clipboard: Arc<ClipboardStore>,
+    /// What the user has been activating, shared with the registry's scorer (ticket 13).
+    usage: Arc<UsageStore>,
 }
 
 #[interface(name = "org.gnome.Lumen.Engine")]
@@ -119,6 +122,30 @@ impl Engine {
         };
         let _ = self.jobs.send(job);
         id
+    }
+
+    // ---- Activation (ticket 13: usage learning). ----
+
+    /// Record that the user activated a result, and report the routing outcome.
+    ///
+    /// An activation is the only thing the daemon ever learns about what the user actually chose:
+    /// it is counted here, and the count comes back through the scorer as contract §5's usage term
+    /// on the next query. The count is written to the user's data directory, so a restart — or the
+    /// next session — ranks what the user reaches for first.
+    ///
+    /// Today no daemon-owned action is performed for any result id, so the outcome is always
+    /// `handled: false` with `recorded` and `usage` reporting what was learned. Claiming no
+    /// `shell_action` leaves the extension's own handling of the id exactly as it was.
+    fn activate(&self, result_id: String, action_id: String) -> Row {
+        let _ = action_id;
+        let recorded = !result_id.is_empty();
+        let usage = self.usage.record(&result_id);
+
+        Row::from([
+            ("handled".to_string(), Variant::new(false)),
+            ("recorded".to_string(), Variant::new(recorded)),
+            ("usage".to_string(), Variant::new(usage)),
+        ])
     }
 
     #[zbus(signal)]
@@ -205,7 +232,14 @@ fn timestamp_of(timestamp_ms: u64) -> i64 {
 /// Own `config.dbus_name`, export the engine and start the search thread.
 pub async fn serve(config: Config) -> zbus::Result<Serving> {
     let clipboard = Arc::new(ClipboardStore::new());
-    let registry = Arc::new(Registry::new(&config.indexer, Arc::clone(&clipboard)));
+    // What the user has been activating, read back from the data directory (or held in memory when
+    // there is nowhere to write it); shared by the recorder and the scorer.
+    let usage = Arc::new(UsageStore::from_env());
+    let registry = Arc::new(Registry::with_usage(
+        &config.indexer,
+        Arc::clone(&clipboard),
+        Arc::clone(&usage),
+    ));
     let issued = Arc::new(AtomicU64::new(0));
     let (jobs_tx, jobs_rx) = mpsc::channel();
 
@@ -214,6 +248,7 @@ pub async fn serve(config: Config) -> zbus::Result<Serving> {
         jobs: jobs_tx,
         issued: Arc::clone(&issued),
         clipboard,
+        usage,
     };
 
     let name = config.dbus_name.clone();
