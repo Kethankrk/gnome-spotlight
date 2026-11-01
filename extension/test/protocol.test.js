@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
     BUS_NAME, OBJECT_PATH, INTERFACE, PROTOCOL_MAJOR, SUPPORTED_MAJOR,
     PROVIDER_IDS, CAPABILITY_IDS, SECTION_ORDER, SECTION_CAPS, ID_PREFIXES,
-    providerOfId, PROVIDER_LABELS, ACTION_HANDLERS,
+    providerOfId, PROVIDER_LABELS, ACTION_HANDLERS, SHELL_ACTIONS,
 } from '../lib/protocol.js';
 
 test('the identity constants are the contract identity', () => {
@@ -39,4 +39,12 @@ test('providerOfId maps a result id back to its provider', () => {
 
 test('the action handlers are the contract set', () => {
     assert.deepEqual(ACTION_HANDLERS, ['open', 'copy', 'reveal', 'shell']);
+});
+
+test('the shell actions are the ones the daemon hands back to the extension', () => {
+    // `open-url` opens the browser, `copy` writes the clipboard and `reveal` shows the file in the
+    // file manager. The last two name a row handler as well; `open-url` is only ever a routed
+    // action, never something a row carries.
+    assert.deepEqual(SHELL_ACTIONS, ['open-url', 'copy', 'reveal']);
+    assert.ok(!ACTION_HANDLERS.includes('open-url'));
 });

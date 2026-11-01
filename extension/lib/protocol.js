@@ -66,7 +66,9 @@ export const SECTION_CAPS = {
 };
 
 export const ACTION_HANDLERS = ['open', 'copy', 'reveal', 'shell'];
-export const SHELL_ACTIONS = ['open-url'];
+// The shell-only actions the daemon routes back instead of performing (contract §2): the extension
+// opens the url, writes the clipboard or shows the file in the file manager.
+export const SHELL_ACTIONS = ['open-url', 'copy', 'reveal'];
 
 export const ID_PREFIXES = {
     applications: 'app:',

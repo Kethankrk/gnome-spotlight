@@ -4,7 +4,15 @@
 
 import {PROVIDER_IDS, PROVIDER_LABELS, SECTION_CAPS, SECTION_ORDER} from './protocol.js';
 
-export function buildViewModel(results) {
+/**
+ * Flatten the daemon's ranked list into the Top Hit plus the fixed sections.
+ *
+ * `caps` optionally replaces a section's cap (`{files: 30}`) for a caller that asked the daemon for
+ * a bigger page than the contract's default section size — the files section otherwise could never
+ * show a second page of results (contract §20). Sections the caller does not name keep their
+ * contract cap.
+ */
+export function buildViewModel(results, {caps = null} = {}) {
     const known = (results ?? []).filter(result => PROVIDER_IDS.includes(result?.provider));
     const sorted = dedupe([...known].sort(compareResults));
     const topHit = sorted.length > 0 ? sorted[0] : null;
@@ -12,7 +20,7 @@ export function buildViewModel(results) {
     const flat = topHit ? [topHit] : [];
 
     for (const provider of SECTION_ORDER) {
-        const cap = SECTION_CAPS[provider] ?? 0;
+        const cap = caps?.[provider] ?? SECTION_CAPS[provider] ?? 0;
         const items = sorted
             .filter(result => result.provider === provider && result !== topHit)
             .slice(0, cap);

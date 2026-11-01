@@ -12,6 +12,7 @@ export const KEYS = {
     KpEnter: 0xff8d,
     Tab: 0xff09,
     IsoLeftTab: 0xfe20,
+    Delete: 0xffff,
 };
 
 export const DEFAULT_PAGE_SIZE = 8;
@@ -30,7 +31,8 @@ export function hasShift(modifiers) {
  * The intent of a key press, or null for a key the list does not use. `pageSize` is accepted so
  * callers can pass one options object; the navigator owns the step it actually takes. Tab and
  * Shift+Tab move between sections (ticket 14); `next`/`prev` stay the row-by-row movement the
- * arrows use.
+ * arrows use. `delete` is not navigation: it is the key that forgets the selected row (story 48),
+ * and what a modifier does with it is the shell's to decide.
  */
 export function intentFor(keyval, options = {}) {
     const shift = options?.shift ?? false;
@@ -55,6 +57,8 @@ export function intentFor(keyval, options = {}) {
         return shift ? 'prev-section' : 'next-section';
     case KEYS.IsoLeftTab:
         return 'prev-section';
+    case KEYS.Delete:
+        return 'delete';
     default:
         return null;
     }

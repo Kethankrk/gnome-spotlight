@@ -85,6 +85,32 @@ test('sections of one item are still capped at the contract cap', () => {
         SECTION_CAPS.calculator);
 });
 
+test('a caller may raise a section cap, which is how paging shows more files', () => {
+    const files = Array.from({length: SECTION_CAPS.files + 12}, (_, i) =>
+        result('files', `report-${i}.md`, 1.0 - i / 100, `file:/home/me/report-${i}.md`));
+
+    const byDefault = buildViewModel(files);
+    assert.equal(
+        byDefault.sections.find(s => s.provider === 'files').items.length,
+        SECTION_CAPS.files,
+        'the contract cap is the default',
+    );
+
+    const raised = buildViewModel(files, {caps: {files: files.length}});
+    assert.equal(
+        raised.sections.find(s => s.provider === 'files').items.length,
+        files.length - 1,
+        'the top hit is one of the files, and the rest of the page is shown',
+    );
+
+    // Only the section that was named changes.
+    const other = buildViewModel(files, {caps: {clipboard: 1}});
+    assert.equal(
+        other.sections.find(s => s.provider === 'files').items.length,
+        SECTION_CAPS.files,
+    );
+});
+
 test('the flat list is the top hit followed by the sections, so row index == flat index', () => {
     const view = buildViewModel([
         result('applications', 'Notes', 1.3),

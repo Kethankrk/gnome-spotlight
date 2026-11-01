@@ -181,8 +181,9 @@ fn repeated_activation_promotes_a_result_in_the_ranking() {
         "and it climbs with every press"
     );
     assert!(
-        !bool_of(&last, "handled"),
-        "the daemon records the activation; performing the action is not this ticket's job"
+        bool_of(&last, "handled"),
+        "the daemon opens the file itself (contract §2, §19); the harness points the opener at \
+         /bin/true, so nothing is actually launched"
     );
 
     assert_eq!(

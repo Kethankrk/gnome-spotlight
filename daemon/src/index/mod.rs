@@ -169,7 +169,7 @@ impl FileIndex for FakeIndex {
         let matching = excludes::filter_excluded(
             self.hits
                 .iter()
-                .filter(|hit| excludes::quality(&hit.name, &needle) > 0.0)
+                .filter(|hit| crate::ranking::match_quality(&hit.name, &needle) > 0.0)
                 .cloned()
                 .collect(),
         );

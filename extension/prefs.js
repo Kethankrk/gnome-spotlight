@@ -6,12 +6,13 @@
 // — lives in `lib/shortcut.js`, which is Node-tested (`extension/test/shortcut.test.js`). What is
 // left here is widget glue: capture a key combination, write it, say what is wrong with it.
 //
-// Four schema keys are edited, and each is written to GSettings the moment it changes, so the
-// running extension sees it through `changed::` and no shell restart is needed:
+// Five schema keys are edited, and each is written to GSettings the moment it changes, so the
+// running extension (or the daemon) sees it through `changed::` and no shell restart is needed:
 //
 //   `summon-shortcut`      a shortcut editor, with an inline warning when the combination is
 //                          already grabbed by the shell or by gnome-settings-daemon
 //   `appearance`           system / light / dark, applied to the overlay live
+//   `search-engine`        the url template behind the web-search row (story 32)
 //   `providers-enabled`    one switch per provider in `PROVIDER_IDS`
 //   `clipboard-enabled`    turns history recording on and off, live
 //
@@ -48,6 +49,7 @@ const SUMMON_KEY = 'summon-shortcut';
 const APPEARANCE_KEY = 'appearance';
 const PROVIDERS_KEY = 'providers-enabled';
 const CLIPBOARD_KEY = 'clipboard-enabled';
+const SEARCH_ENGINE_KEY = 'search-engine';
 
 const WM_KEYBINDINGS_SCHEMA = 'org.gnome.desktop.wm.keybindings';
 const MEDIA_KEYS_SCHEMA = 'org.gnome.settings-daemon.plugins.media-keys';
@@ -151,6 +153,7 @@ export default class LumenPreferences extends ExtensionPreferences {
 
         page.add(summon);
         page.add(this._appearanceGroup());
+        page.add(this._searchEngineGroup());
         page.add(this._clipboardGroup());
         return page;
     }
@@ -178,6 +181,31 @@ export default class LumenPreferences extends ExtensionPreferences {
         });
 
         group.add(combo);
+        return group;
+    }
+
+    // The engine behind the last-resort row (story 32). It is a plain entry rather than a list: the
+    // daemon reads the key when it builds the row and accepts any template with a `%s` in it, and
+    // the schema default is DuckDuckGo. A template without `%s` is not refused here — the daemon
+    // falls back to the default rather than showing nothing — so the description says so.
+    _searchEngineGroup() {
+        const group = new Adw.PreferencesGroup({
+            title: 'Web search',
+            description: 'The search engine behind the last row of the results. `%s` is replaced by '
+                + 'what you typed; a template without it (or an empty one) uses DuckDuckGo.',
+        });
+
+        const row = new Adw.EntryRow({title: 'Search engine'});
+        row.text = this._settings.get_string(SEARCH_ENGINE_KEY);
+
+        // Written straight through, as every other row here is; the daemon is the process that
+        // reads it, so there is nothing in the running shell to update.
+        row.connect('notify::text', () => {
+            if (row.text !== this._settings.get_string(SEARCH_ENGINE_KEY))
+                this._settings.set_string(SEARCH_ENGINE_KEY, row.text);
+        });
+
+        group.add(row);
         return group;
     }
 

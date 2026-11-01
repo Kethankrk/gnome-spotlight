@@ -19,7 +19,14 @@ import {
     accessibilityState,
 } from './lib/a11y.js';
 import {BUS_NAME, OBJECT_PATH, INTERFACE, SUPPORTED_MAJOR} from './lib/protocol.js';
-import {buildRequest, hasSecondWindowModifier} from './lib/query.js';
+import {
+    DEFAULT_RESULT_LIMIT,
+    buildRequest,
+    clampResultLimit,
+    hasControlModifier,
+    hasSecondWindowModifier,
+} from './lib/query.js';
+import {activationAction} from './lib/activation.js';
 import {buildViewModel} from './lib/viewmodel.js';
 import {createNavigator, sectionStarts} from './lib/navigation.js';
 import {DEFAULT_PAGE_SIZE, hasShift, intentFor} from './lib/keys.js';
@@ -40,9 +47,18 @@ const SUMMON_KEYBINDING = 'summon-shortcut';
 const PROVIDERS_KEY = 'providers-enabled';
 const APPEARANCE_KEY = 'appearance';
 const CLIPBOARD_KEY = 'clipboard-enabled';
+const RESULT_LIMIT_KEY = 'result-limit';
 const APPLICATION_PROVIDER = 'applications';
+// The one provider whose rows are paged by count, so the offset of the next page is how many of
+// them are already loaded (contract §11).
+const FILE_PROVIDER = 'files';
 // Providers the shell resolves itself: the daemon ranks them, but only the shell can run them.
 const SHELL_PROVIDERS = new Set([ACTION_PROVIDER, SETTINGS_PROVIDER]);
+// The `delete` action a clipboard entry carries (§11): the Delete key is what runs it, and
+// Control+Delete clears the whole history. Distinct from a row's id so the arm cannot be confused
+// with the destructive rows `_activateSystem` confirms.
+const DELETE_ACTION = 'delete';
+const CLEAR_CLIPBOARD = 'clear-clipboard';
 
 export default class LumenExtension extends Extension {
     enable() {
@@ -56,6 +72,10 @@ export default class LumenExtension extends Extension {
         this._activeSearch = null;
         this._awaitingResults = false;
         this._results = [];
+        // The daemon's own results for the query on screen, and how many of them are file rows —
+        // the offset of the next page (contract §11).
+        this._loaded = [];
+        this._loadedFiles = 0;
         this._navigator = null;
         this._apps = null;
         this._clipboard = St.Clipboard.get_default();
@@ -186,6 +206,8 @@ export default class LumenExtension extends Extension {
         this._overlay = null;
         this._navigator = null;
         this._results = [];
+        this._loaded = [];
+        this._loadedFiles = 0;
         this._apps = null;
         this._clipboard = null;
         this._sampler = null;
@@ -348,10 +370,13 @@ export default class LumenExtension extends Extension {
         this._overlay?.setEngineState(state);
         this._syncClipboardCapture();
 
-        if (state.status !== EngineStatus.OK)
+        if (state.status !== EngineStatus.OK) {
+            this._loaded = [];
+            this._loadedFiles = 0;
             this._render([]);
-        else if (changed && this._overlay?.entry.get_text())
+        } else if (changed && this._overlay?.entry.get_text()) {
             this._onQueryChanged();
+        }
     }
 
     _dropProxy() {
@@ -544,7 +569,9 @@ export default class LumenExtension extends Extension {
     }
 
     // The query pipeline: shell-owned candidates go to the daemon, which ranks them with its own.
-    _onQueryChanged() {
+    // `offset` asks for a later page of the daemon's own paging providers (contract §11); the first
+    // page of a new query starts from scratch, and a page is merged into what is already loaded.
+    _onQueryChanged({offset = 0} = {}) {
         this._activeSearch = null;
         this._awaitingResults = false;
         this._confirmation = null;
@@ -553,6 +580,11 @@ export default class LumenExtension extends Extension {
             this._overlay?.entry.get_text() ?? '',
             this._settings?.get_strv(PROVIDERS_KEY) ?? [],
         );
+
+        if (offset === 0) {
+            this._loaded = [];
+            this._loadedFiles = 0;
+        }
 
         if (request.text === '') {
             this._overlay?.setStatus(this._engine.message);
@@ -567,10 +599,14 @@ export default class LumenExtension extends Extension {
             return;
         }
 
-        const call = new GLib.Variant(
-            '(sasa{sv})',
-            [request.text, request.enabled, {injected: variantsOf(injected)}],
-        );
+        const options = {
+            injected: variantsOf(injected),
+            limit: new GLib.Variant('u', clampResultLimit(this._settings?.get_int(RESULT_LIMIT_KEY))),
+        };
+        if (offset > 0)
+            options.offset = new GLib.Variant('u', offset);
+
+        const call = new GLib.Variant('(sasa{sv})', [request.text, request.enabled, options]);
 
         this._awaitingResults = true;
         this._proxy.call('Query', call, Gio.DBusCallFlags.NONE, -1, null, (proxy, result) => {
@@ -582,6 +618,22 @@ export default class LumenExtension extends Extension {
                 this._overlay?.setStatus('the engine refused the query');
             }
         });
+    }
+
+    // PageDown on a list that is already showing results asks for the next page: the offset is how
+    // many file rows are on screen, which is where the daemon's file provider left off, and the
+    // page is merged into them. Without an engine there is nothing to page from.
+    _requestNextPage() {
+        if (this._shutdown || !this._overlay?.isOpen)
+            return;
+
+        if (this._engine.status !== EngineStatus.OK || !this._proxy)
+            return;
+
+        if (this._loadedFiles === 0)
+            return;
+
+        this._onQueryChanged({offset: this._loadedFiles});
     }
 
     _onResultsChanged(parameters) {
@@ -596,11 +648,18 @@ export default class LumenExtension extends Extension {
         if (searchId !== this._activeSearch)
             return;
 
-        this._render(resultsFromRows(rows));
+        const page = resultsFromRows(rows);
+        this._loaded = mergeById(this._loaded, page);
+        this._loadedFiles = this._loaded.filter(result => result.provider === FILE_PROVIDER).length;
+        this._render(this._loaded);
     }
 
     _render(results) {
-        const view = buildViewModel(results);
+        // The files section is capped by the page the user asked for (contract §11, §20), never
+        // below the contract's own cap, so a second page is visible rather than discarded.
+        const view = buildViewModel(results, {
+            caps: {files: Math.max(DEFAULT_RESULT_LIMIT, this._loadedFiles)},
+        });
         const previous = this._navigator?.current ?? 0;
 
         // Activation is by row index, and a row index is a `flat` index. `sectionStarts` reports
@@ -652,12 +711,15 @@ export default class LumenExtension extends Extension {
             return true;
         case 'page-down':
             navigator.pageDown(DEFAULT_PAGE_SIZE);
+            this._requestNextPage();
             return true;
         case 'activate':
             if (navigator.current < 0)
                 return false;
-            this._activate(navigator.current, {newWindow: hasSecondWindowModifier(modifiers)});
+            this._activate(navigator.current, {modifiers});
             return true;
+        case 'delete':
+            return this._onDeleteKey(modifiers);
         default:
             return false;
         }
@@ -665,20 +727,96 @@ export default class LumenExtension extends Extension {
 
     _onRowActivated(index) {
         this._navigator?.select(index);
-        this._activate(index, {newWindow: false});
+        this._activate(index);
     }
 
-    _activate(index, {newWindow = false} = {}) {
+    // Which of the row's actions a press runs is lib/activation.js's decision — plain Enter the
+    // primary one, Control the secondary (`Show in Files`, or a second window for an application)
+    // and Alt the copy — so only the providers the shell cannot delegate are handled here.
+    _activate(index, {modifiers = 0} = {}) {
         const result = this._results[index];
         if (!result)
             return;
 
         if (result.provider === APPLICATION_PROVIDER)
-            this._launchApplication(result, newWindow);
+            this._launchApplication(result, hasSecondWindowModifier(modifiers));
         else if (SHELL_PROVIDERS.has(result.provider))
             this._activateSystem(result);
         else
-            this._activateWithEngine(result);
+            this._activateWithEngine(result, activationAction(result, modifiers));
+    }
+
+    // Delete forgets (story 48): the selected clipboard entry, or — with Control, the modifier the
+    // other destructive errands use — the whole history, which arms on the first press. A row that
+    // does not carry the `delete` action is not something this key can forget, so it is passed on.
+    _onDeleteKey(modifiers) {
+        const result = this._results[this._navigator?.current ?? -1];
+        if (!result?.actions?.some(action => action.id === DELETE_ACTION))
+            return false;
+
+        if (hasControlModifier(modifiers)) {
+            this._clearClipboardHistory();
+            return true;
+        }
+
+        this._deleteClipboardEntry(result);
+        return true;
+    }
+
+    _deleteClipboardEntry(result) {
+        if (this._engine.status !== EngineStatus.OK || !this._proxy) {
+            this._reportFailure(`could not delete the entry: ${ENGINE_NOT_RUNNING}`);
+            return;
+        }
+
+        const call = new GLib.Variant('(s)', [result.id]);
+        this._proxy.call('ClipboardDelete', call, Gio.DBusCallFlags.NONE, -1, null,
+            (proxy, reply) => {
+                let deleted = false;
+                try {
+                    [deleted] = proxy.call_finish(reply).deep_unpack();
+                } catch (error) {
+                    logError(error, `Lumen: could not delete ${result.id}`);
+                    this._reportFailure('could not delete the clipboard entry');
+                    return;
+                }
+
+                if (!deleted) {
+                    this._reportFailure('that clipboard entry is already gone');
+                    return;
+                }
+
+                // The engine emits ClipboardChanged, which re-runs the query on screen.
+                this._overlay?.setStatus('clipboard entry deleted');
+            });
+    }
+
+    // Clearing has no undo, so it arms on the first press exactly like Log Out does.
+    _clearClipboardHistory() {
+        if (this._confirmation !== CLEAR_CLIPBOARD) {
+            this._confirmation = CLEAR_CLIPBOARD;
+            this._overlay?.setStatus('press Control+Delete again to clear the clipboard history');
+            return;
+        }
+        this._confirmation = null;
+
+        if (this._engine.status !== EngineStatus.OK || !this._proxy) {
+            this._reportFailure(`could not clear the clipboard history: ${ENGINE_NOT_RUNNING}`);
+            return;
+        }
+
+        this._proxy.call('ClipboardClear', null, Gio.DBusCallFlags.NONE, -1, null,
+            (proxy, reply) => {
+                try {
+                    proxy.call_finish(reply);
+                } catch (error) {
+                    logError(error, 'Lumen: could not clear the clipboard history');
+                    this._reportFailure('could not clear the clipboard history');
+                    return;
+                }
+
+                this._overlay?.setStatus('clipboard history cleared');
+            });
     }
 
     // Lock, suspend, log out and the setting toggles: only the shell can do these, so they never
@@ -774,13 +912,13 @@ export default class LumenExtension extends Extension {
         });
     }
 
-    _activateWithEngine(result) {
+    _activateWithEngine(result, action = null) {
         if (this._engine.status !== EngineStatus.OK || !this._proxy) {
             this._reportFailure(`could not open ${result.title}: ${ENGINE_NOT_RUNNING}`);
             return;
         }
 
-        const actionId = result.actions?.[0]?.id ?? 'open';
+        const actionId = action?.id ?? result.actions?.[0]?.id ?? 'open';
         const call = new GLib.Variant('(ss)', [result.id, actionId]);
 
         this._proxy.call('Activate', call, Gio.DBusCallFlags.NONE, -1, null, (proxy, reply) => {
@@ -797,32 +935,129 @@ export default class LumenExtension extends Extension {
         });
     }
 
+    // `handled: true` means the daemon did it (it opens files and recent documents itself). A shell
+    // action is the shell's: the browser for `open-url`, the clipboard for `copy`, the file manager
+    // for `reveal`. Anything else is a row with nothing to run, and says so rather than looking
+    // like a no-op.
     _onActivated(result, outcome) {
         if (outcome.handled) {
             this._overlay?.close();
             return;
         }
 
-        if (outcome.shell_action === 'open-url') {
-            const [url] = outcome.args ?? [];
-            if (!url) {
-                this._reportFailure(`could not open ${result.title}: no url`);
-                return;
-            }
+        switch (outcome.shell_action) {
+        case 'open-url':
+            this._openUrl(result, outcome.args ?? []);
+            return;
+        case 'copy':
+            this._copyToClipboard(result, outcome.args ?? []);
+            return;
+        case 'reveal':
+            this._revealInFiles(result, outcome.args ?? []);
+            return;
+        default:
+            this._reportFailure(`${result.title} has nothing to run`);
+        }
+    }
 
-            try {
-                Gio.AppInfo.launch_default_for_uri(url, null);
-            } catch (error) {
-                logError(error, `Lumen: could not open ${url}`);
-                this._reportFailure('could not open the web search');
-                return;
-            }
-
-            this._overlay?.close();
+    _openUrl(result, args) {
+        const [url] = args;
+        if (!url) {
+            this._reportFailure(`could not open ${result.title}: no url`);
             return;
         }
 
-        this._reportFailure(`${result.title} has nothing to run`);
+        try {
+            Gio.AppInfo.launch_default_for_uri(url, null);
+        } catch (error) {
+            logError(error, `Lumen: could not open ${url}`);
+            this._reportFailure('could not open the web search');
+            return;
+        }
+
+        this._overlay?.close();
+    }
+
+    // Only the shell owns the Wayland clipboard (contract §2), so the daemon hands the text over
+    // and writing it is ours. A write that fails is left on the status label, never swallowed.
+    _copyToClipboard(result, args) {
+        const [text] = args;
+        if (!text) {
+            this._reportFailure(`could not copy ${result.title}: nothing to copy`);
+            return;
+        }
+
+        try {
+            this._clipboard.set_text(St.ClipboardType.CLIPBOARD, text);
+        } catch (error) {
+            logError(error, `Lumen: could not copy ${result.title}`);
+            this._reportFailure(`could not copy ${result.title}`);
+            return;
+        }
+
+        this._overlay?.close();
+    }
+
+    // `Show in Files` goes through the interface browsers use to reveal a download
+    // (`org.freedesktop.FileManager1`, implemented by Nautilus); a session without it opens the
+    // containing folder instead, and either failure ends up on the status label.
+    _revealInFiles(result, args) {
+        const [path] = args;
+        if (!path) {
+            this._reportFailure(`could not show ${result.title}: no path`);
+            return;
+        }
+
+        let uri;
+        try {
+            uri = GLib.filename_to_uri(path, null);
+        } catch (error) {
+            logError(error, `Lumen: ${path} is not a path Lumen can show`);
+            this._reportFailure(`could not show ${result.title} in Files`);
+            return;
+        }
+
+        const bus = Gio.DBus.session;
+        if (!bus) {
+            this._openContainingFolder(result, path);
+            return;
+        }
+
+        bus.call(
+            'org.freedesktop.FileManager1',
+            '/org/freedesktop/FileManager1',
+            'org.freedesktop.FileManager1',
+            'ShowItems',
+            new GLib.Variant('(ass)', [[uri], '']),
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null,
+            (connection, reply) => {
+                try {
+                    connection.call_finish(reply);
+                } catch (error) {
+                    logError(error, `Lumen: the file manager did not show ${path}`);
+                    this._openContainingFolder(result, path);
+                    return;
+                }
+
+                this._overlay?.close();
+            });
+    }
+
+    _openContainingFolder(result, path) {
+        const folder = GLib.path_get_dirname(path);
+
+        try {
+            Gio.AppInfo.launch_default_for_uri(GLib.filename_to_uri(folder, null), null);
+        } catch (error) {
+            logError(error, `Lumen: could not open ${folder}`);
+            this._reportFailure(`could not show ${result.title} in Files`);
+            return;
+        }
+
+        this._overlay?.close();
     }
 
     // A failed launch must not look like a no-op, so the reason is left on screen.
@@ -890,4 +1125,12 @@ function variantsOfFields(fields) {
             : new GLib.Variant('s', String(value ?? ''));
     }
     return variant;
+}
+
+// A page of results joined to the ones already loaded, by result id: the daemon answers a later
+// page with the same ranking applied to a later slice, so the same row can arrive twice. The
+// viewmodel sorts what it is given, so the order here only has to be stable.
+function mergeById(loaded, page) {
+    const seen = new Set((loaded ?? []).map(result => result.id));
+    return [...(loaded ?? []), ...(page ?? []).filter(result => !seen.has(result.id))];
 }

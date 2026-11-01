@@ -72,6 +72,15 @@ pub trait Provider: Send + Sync + 'static {
     fn query(&self, request: &QueryRequest) -> Vec<ResultItem>;
 }
 
+/// The largest page a paging provider returns, whatever limit a caller asks for (contract §11).
+pub const MAX_PAGE: usize = 30;
+
+/// Resolve a requested page size: the caller's limit when it sent one, clamped to [`MAX_PAGE`],
+/// and never zero. Every paging provider resolves it the same way — only the default differs.
+pub fn page_size(requested: Option<usize>, default: usize) -> usize {
+    requested.unwrap_or(default).clamp(1, MAX_PAGE)
+}
+
 /// A provider with no data source yet. Every later ticket replaces one of these.
 pub struct Stub {
     id: &'static str,
@@ -95,5 +104,19 @@ impl Provider for Stub {
 
     fn query(&self, _request: &QueryRequest) -> Vec<ResultItem> {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_requested_page_size_is_clamped_and_never_zero() {
+        assert_eq!(page_size(None, 8), 8, "a provider's own default when none is asked for");
+        assert_eq!(page_size(None, 4), 4, "and each provider has its own");
+        assert_eq!(page_size(Some(3), 8), 3);
+        assert_eq!(page_size(Some(0), 8), 1, "a page of nothing is not a page");
+        assert_eq!(page_size(Some(usize::MAX), 8), MAX_PAGE);
     }
 }
