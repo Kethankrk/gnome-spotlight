@@ -31,3 +31,51 @@
     padding: 2px 0 4px 0;
     text-align: center;
 }
+
+.lumen-scroll {
+    max-height: 360px;
+    margin-top: 2px;
+}
+
+.lumen-results {
+    spacing: 2px;
+}
+
+.lumen-tophit {
+    spacing: 2px;
+    margin-bottom: 4px;
+}
+
+.lumen-section-header {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 11px;
+    font-weight: bold;
+    padding: 6px 8px 2px 8px;
+}
+
+.lumen-row {
+    border-radius: 10px;
+    padding: 6px 8px;
+}
+
+.lumen-row-selected {
+    background-color: rgba(255, 255, 255, 0.18);
+}
+
+.lumen-row-icon {
+    icon-size: 24px;
+}
+
+.lumen-row-text {
+    spacing: 1px;
+}
+
+.lumen-row-title {
+    color: #ffffff;
+    font-size: 14px;
+}
+
+.lumen-row-subtitle {
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 11px;
+}

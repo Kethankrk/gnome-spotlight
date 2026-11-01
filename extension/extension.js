@@ -1,4 +1,5 @@
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 
@@ -6,10 +7,18 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {LumenOverlay} from './overlay.js';
-import {engineState} from './lib/engine.js';
+import {EngineStatus, engineState, ENGINE_NOT_RUNNING} from './lib/engine.js';
 import {BUS_NAME, OBJECT_PATH, INTERFACE, SUPPORTED_MAJOR} from './lib/protocol.js';
+import {buildRequest, hasSecondWindowModifier} from './lib/query.js';
+import {buildViewModel} from './lib/viewmodel.js';
+import {createNavigator} from './lib/navigation.js';
+import {DEFAULT_PAGE_SIZE, intentFor} from './lib/keys.js';
+import {appCandidates, appIdFromResultId} from './lib/apps.js';
+import {resultsFromRows, unpack} from './lib/wire.js';
 
 const SUMMON_KEYBINDING = 'summon-shortcut';
+const PROVIDERS_KEY = 'providers-enabled';
+const APPLICATION_PROVIDER = 'applications';
 
 export default class LumenExtension extends Extension {
     enable() {
@@ -19,10 +28,21 @@ export default class LumenExtension extends Extension {
         this._proxySignals = [];
         this._owner = null;
         this._keybindingBound = false;
-        this._engineStatus = null;
+        this._engine = {status: null, message: ENGINE_NOT_RUNNING};
+        this._activeSearch = null;
+        this._awaitingResults = false;
+        this._results = [];
+        this._navigator = null;
+        this._apps = null;
 
-        this._overlay = new LumenOverlay();
+        this._overlay = new LumenOverlay({
+            onActivate: index => this._onRowActivated(index),
+            onKey: (keyval, modifiers) => this._onKey(keyval, modifiers),
+        });
         this._setEngineState(null, null);
+
+        this._textChangedId = this._overlay.entry.clutter_text.connect(
+            'text-changed', () => this._onQueryChanged());
 
         this._shortcutChangedId = this._settings.connect(
             `changed::${SUMMON_KEYBINDING}`, () => this._bindShortcut());
@@ -38,6 +58,11 @@ export default class LumenExtension extends Extension {
 
     disable() {
         this._shutdown = true;
+
+        if (this._overlay && this._textChangedId) {
+            this._overlay.entry.clutter_text.disconnect(this._textChangedId);
+            this._textChangedId = 0;
+        }
 
         if (this._shortcutChangedId) {
             this._settings?.disconnect(this._shortcutChangedId);
@@ -58,6 +83,9 @@ export default class LumenExtension extends Extension {
         this._dropProxy();
         this._overlay?.destroy();
         this._overlay = null;
+        this._navigator = null;
+        this._results = [];
+        this._apps = null;
     }
 
     _bindShortcut() {
@@ -84,6 +112,7 @@ export default class LumenExtension extends Extension {
         if (Main.modalCount > 0)
             return;
 
+        this._apps = null;
         this._overlay.open();
     }
 
@@ -118,9 +147,15 @@ export default class LumenExtension extends Extension {
         }
 
         this._proxy = proxy;
+        // Gio.DBusProxy.connectSignal() returns an id but never fires on GJS 1.88.1, so the
+        // engine's signals come through 'g-signal' and are filtered by name here.
         this._proxySignals = [
             proxy.connect('g-properties-changed', () => this._readVersion()),
             proxy.connect('notify::g-name-owner', () => this._readVersion()),
+            proxy.connect('g-signal', (_proxy, _sender, signalName, parameters) => {
+                if (signalName === 'ResultsChanged')
+                    this._onResultsChanged(parameters);
+            }),
         ];
         this._readVersion();
     }
@@ -144,11 +179,18 @@ export default class LumenExtension extends Extension {
 
     _setEngineState(nameOwner, version) {
         const state = engineState({nameOwner, version, supported: SUPPORTED_MAJOR});
-        if (state.status !== this._engineStatus) {
-            this._engineStatus = state.status;
+        const changed = state.status !== this._engine.status;
+        this._engine = state;
+
+        if (changed)
             log(`Lumen: engine ${state.status} (${state.message})`);
-        }
+
         this._overlay?.setEngineState(state);
+
+        if (state.status !== EngineStatus.OK)
+            this._render([]);
+        else if (changed && this._overlay?.entry.get_text())
+            this._onQueryChanged();
     }
 
     _dropProxy() {
@@ -158,5 +200,268 @@ export default class LumenExtension extends Extension {
         for (const id of this._proxySignals)
             proxy?.disconnect(id);
         this._proxySignals = [];
+        this._activeSearch = null;
+        this._awaitingResults = false;
     }
+
+    // The query pipeline: shell-owned candidates go to the daemon, which ranks them with its own.
+    _onQueryChanged() {
+        this._activeSearch = null;
+        this._awaitingResults = false;
+
+        const request = buildRequest(
+            this._overlay?.entry.get_text() ?? '',
+            this._settings?.get_strv(PROVIDERS_KEY) ?? [],
+        );
+
+        if (request.text === '') {
+            this._overlay?.setStatus(this._engine.message);
+            this._render([]);
+            return;
+        }
+
+        const injected = appCandidates(this._applicationCandidates(), request.text, {now: Date.now()});
+
+        if (this._engine.status !== EngineStatus.OK || !this._proxy) {
+            this._render(injected);
+            return;
+        }
+
+        const call = new GLib.Variant(
+            '(sasa{sv})',
+            [request.text, request.enabled, {injected: variantsOf(injected)}],
+        );
+
+        this._awaitingResults = true;
+        this._proxy.call('Query', call, Gio.DBusCallFlags.NONE, -1, null, (proxy, result) => {
+            try {
+                const [searchId] = proxy.call_finish(result).deep_unpack();
+                this._activeSearch = searchId;
+            } catch (error) {
+                logError(error, 'Lumen: the engine refused the query');
+                this._overlay?.setStatus('the engine refused the query');
+            }
+        });
+    }
+
+    _onResultsChanged(parameters) {
+        if (!this._awaitingResults)
+            return;
+
+        const [searchId, rows] = parameters.deep_unpack ? parameters.deep_unpack() : parameters;
+
+        // Results can beat the Query reply back; the first signal of a request is still current.
+        if (this._activeSearch === null)
+            this._activeSearch = searchId;
+        if (searchId !== this._activeSearch)
+            return;
+
+        this._render(resultsFromRows(rows));
+    }
+
+    _render(results) {
+        const view = buildViewModel(results);
+        const previous = this._navigator?.current ?? 0;
+
+        // Activation is by row index, and a row index is a `flat` index.
+        this._results = view.flat;
+        this._navigator = createNavigator(view.flat.length, {
+            pageSize: DEFAULT_PAGE_SIZE,
+            onChange: index => this._overlay?.setSelected(index),
+        });
+        this._overlay?.setResults(view);
+
+        if (previous > 0)
+            this._navigator.select(Math.min(previous, view.flat.length - 1));
+    }
+
+    _onKey(keyval, modifiers) {
+        const intent = intentFor(keyval, {pageSize: DEFAULT_PAGE_SIZE});
+        const navigator = this._navigator;
+
+        if (!intent || !navigator)
+            return false;
+
+        switch (intent) {
+        case 'next':
+            navigator.next();
+            return true;
+        case 'prev':
+            navigator.prev();
+            return true;
+        case 'first':
+            navigator.first();
+            return true;
+        case 'last':
+            navigator.last();
+            return true;
+        case 'page-up':
+            navigator.pageUp(DEFAULT_PAGE_SIZE);
+            return true;
+        case 'page-down':
+            navigator.pageDown(DEFAULT_PAGE_SIZE);
+            return true;
+        case 'activate':
+            if (navigator.current < 0)
+                return false;
+            this._activate(navigator.current, {newWindow: hasSecondWindowModifier(modifiers)});
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    _onRowActivated(index) {
+        this._navigator?.select(index);
+        this._activate(index, {newWindow: false});
+    }
+
+    _activate(index, {newWindow = false} = {}) {
+        const result = this._results[index];
+        if (!result)
+            return;
+
+        if (result.provider === APPLICATION_PROVIDER)
+            this._launchApplication(result, newWindow);
+        else
+            this._activateWithEngine(result);
+    }
+
+    _launchApplication(result, newWindow) {
+        const appId = appIdFromResultId(result.id);
+        const app = appId ? Shell.AppSystem.get_default().lookup_app(appId) : null;
+
+        if (!app) {
+            this._reportFailure(`could not launch ${result.title}: application not found`);
+            return;
+        }
+
+        try {
+            if (newWindow && app.can_open_new_window()) {
+                app.open_new_window(-1);
+            } else if (newWindow && app.state === Shell.AppState.RUNNING) {
+                throw new Error(`${result.title} cannot open a new window`);
+            } else {
+                app.activate();
+            }
+        } catch (error) {
+            logError(error, `Lumen: could not launch ${appId}`);
+            this._reportFailure(`could not launch ${result.title}`);
+            return;
+        }
+
+        this._overlay?.close();
+    }
+
+    _activateWithEngine(result) {
+        if (this._engine.status !== EngineStatus.OK || !this._proxy) {
+            this._reportFailure(`could not open ${result.title}: ${ENGINE_NOT_RUNNING}`);
+            return;
+        }
+
+        const actionId = result.actions?.[0]?.id ?? 'open';
+        const call = new GLib.Variant('(ss)', [result.id, actionId]);
+
+        this._proxy.call('Activate', call, Gio.DBusCallFlags.NONE, -1, null, (proxy, reply) => {
+            let outcome;
+            try {
+                outcome = unpack(proxy.call_finish(reply).deep_unpack()[0] ?? {});
+            } catch (error) {
+                logError(error, `Lumen: could not activate ${result.id}`);
+                this._reportFailure(`could not open ${result.title}`);
+                return;
+            }
+
+            this._onActivated(result, outcome);
+        });
+    }
+
+    _onActivated(result, outcome) {
+        if (outcome.handled) {
+            this._overlay?.close();
+            return;
+        }
+
+        if (outcome.shell_action === 'open-url') {
+            const [url] = outcome.args ?? [];
+            if (!url) {
+                this._reportFailure(`could not open ${result.title}: no url`);
+                return;
+            }
+
+            try {
+                Gio.AppInfo.launch_default_for_uri(url, null);
+            } catch (error) {
+                logError(error, `Lumen: could not open ${url}`);
+                this._reportFailure('could not open the web search');
+                return;
+            }
+
+            this._overlay?.close();
+            return;
+        }
+
+        this._reportFailure(`${result.title} has nothing to run`);
+    }
+
+    // A failed launch must not look like a no-op, so the reason is left on screen.
+    _reportFailure(message) {
+        log(`Lumen: ${message}`);
+        this._overlay?.setStatus(message);
+    }
+
+    _applicationCandidates() {
+        if (this._apps)
+            return this._apps;
+
+        const system = Shell.AppSystem.get_default();
+        const seen = new Set();
+        const apps = [];
+
+        for (const app of [...system.get_running(), ...system.get_installed()]) {
+            const id = app.get_id();
+            if (!id || seen.has(id))
+                continue;
+
+            seen.add(id);
+            apps.push({
+                id,
+                name: app.get_name() ?? '',
+                description: app.get_description() ?? '',
+                icon: iconName(app),
+            });
+        }
+
+        this._apps = apps;
+        return apps;
+    }
+}
+
+function iconName(app) {
+    const icon = app.get_icon();
+    return icon instanceof Gio.ThemedIcon ? (icon.get_names()[0] ?? '') : '';
+}
+
+function variantsOf(results) {
+    return results.map(result => ({
+        id: new GLib.Variant('s', result.id),
+        provider: new GLib.Variant('s', result.provider),
+        title: new GLib.Variant('s', result.title),
+        subtitle: new GLib.Variant('s', result.subtitle),
+        icon: new GLib.Variant('s', result.icon),
+        score: new GLib.Variant('d', result.score),
+        actions: new GLib.Variant('aa{sv}', result.actions.map(action => ({
+            id: new GLib.Variant('s', action.id),
+            label: new GLib.Variant('s', action.label),
+            handler: new GLib.Variant('s', action.handler),
+        }))),
+        preview: new GLib.Variant('a{sv}', variantsOfFields(result.preview)),
+    }));
+}
+
+function variantsOfFields(fields) {
+    const variant = {};
+    for (const [key, value] of Object.entries(fields ?? {}))
+        variant[key] = new GLib.Variant('s', String(value));
+    return variant;
 }
