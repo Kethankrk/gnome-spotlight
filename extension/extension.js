@@ -8,6 +8,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {LumenOverlay} from './overlay.js';
+import {LumenSystem} from './system.js';
 import {EngineStatus, engineState, ENGINE_NOT_RUNNING} from './lib/engine.js';
 import {BUS_NAME, OBJECT_PATH, INTERFACE, SUPPORTED_MAJOR} from './lib/protocol.js';
 import {buildRequest, hasSecondWindowModifier} from './lib/query.js';
@@ -15,12 +16,22 @@ import {buildViewModel} from './lib/viewmodel.js';
 import {createNavigator} from './lib/navigation.js';
 import {DEFAULT_PAGE_SIZE, intentFor} from './lib/keys.js';
 import {appCandidates, appIdFromResultId} from './lib/apps.js';
+import {
+    ACTION_PROVIDER,
+    SETTINGS_PROVIDER,
+    actionCandidates,
+    actionVerbFromResultId,
+    settingKeyFromResultId,
+    toggleCandidates,
+} from './lib/actions.js';
 import {resultsFromRows, unpack} from './lib/wire.js';
 import {createClipboardSampler, shouldCapture, SAMPLE_INTERVAL_SECONDS} from './lib/clipboard.js';
 
 const SUMMON_KEYBINDING = 'summon-shortcut';
 const PROVIDERS_KEY = 'providers-enabled';
 const APPLICATION_PROVIDER = 'applications';
+// Providers the shell resolves itself: the daemon ranks them, but only the shell can run them.
+const SHELL_PROVIDERS = new Set([ACTION_PROVIDER, SETTINGS_PROVIDER]);
 
 export default class LumenExtension extends Extension {
     enable() {
@@ -39,12 +50,22 @@ export default class LumenExtension extends Extension {
         this._clipboard = St.Clipboard.get_default();
         this._sampler = createClipboardSampler();
         this._captureTimerId = 0;
+        this._confirmation = null;
 
         this._overlay = new LumenOverlay({
+            onClose: () => this._onOverlayClosed(),
             onActivate: index => this._onRowActivated(index),
             onKey: (keyval, modifiers) => this._onKey(keyval, modifiers),
         });
         this._setEngineState(null, null);
+
+        // The system actions and setting toggles come from the shell itself (ticket 09): their live
+        // state is gathered here, and `onChanged` re-queries when something changes the state
+        // elsewhere — the quick settings menu, `gsettings`, a hardware switch.
+        this._system = new LumenSystem({
+            onChanged: () => this._onSystemStateChanged(),
+            onError: message => this._reportFailure(message),
+        });
 
         this._textChangedId = this._overlay.entry.clutter_text.connect(
             'text-changed', () => this._onQueryChanged());
@@ -88,6 +109,8 @@ export default class LumenExtension extends Extension {
         }
 
         this._dropProxy();
+        this._system?.destroy();
+        this._system = null;
         this._overlay?.destroy();
         this._overlay = null;
         this._navigator = null;
@@ -95,6 +118,7 @@ export default class LumenExtension extends Extension {
         this._apps = null;
         this._clipboard = null;
         this._sampler = null;
+        this._confirmation = null;
     }
 
     _bindShortcut() {
@@ -288,10 +312,45 @@ export default class LumenExtension extends Extension {
         this._onQueryChanged();
     }
 
+    // The candidates the shell computes itself and hands to the daemon to rank: applications, the
+    // system actions and the setting toggles. A provider the user switched off is not injected.
+    _injectedCandidates(request) {
+        const enabled = new Set(request.enabled);
+        const injected = [];
+
+        if (enabled.has(APPLICATION_PROVIDER))
+            injected.push(...appCandidates(this._applicationCandidates(), request.text, {now: Date.now()}));
+
+        if (enabled.has(ACTION_PROVIDER))
+            injected.push(...actionCandidates(request.text, {actions: this._system?.actions}));
+
+        if (enabled.has(SETTINGS_PROVIDER))
+            injected.push(...toggleCandidates(request.text, {toggles: this._system?.toggles}));
+
+        return injected;
+    }
+
+    // Wi-Fi, Bluetooth, Do Not Disturb, the theme, or a lock/suspend availability policy changed
+    // outside the overlay: search again so the rows show the new state.
+    _onSystemStateChanged() {
+        if (this._shutdown || !this._overlay?.isOpen)
+            return;
+
+        if (this._overlay.entry.get_text().trim() === '')
+            return;
+
+        this._onQueryChanged();
+    }
+
+    _onOverlayClosed() {
+        this._confirmation = null;
+    }
+
     // The query pipeline: shell-owned candidates go to the daemon, which ranks them with its own.
     _onQueryChanged() {
         this._activeSearch = null;
         this._awaitingResults = false;
+        this._confirmation = null;
 
         const request = buildRequest(
             this._overlay?.entry.get_text() ?? '',
@@ -304,7 +363,7 @@ export default class LumenExtension extends Extension {
             return;
         }
 
-        const injected = appCandidates(this._applicationCandidates(), request.text, {now: Date.now()});
+        const injected = this._injectedCandidates(request);
 
         if (this._engine.status !== EngineStatus.OK || !this._proxy) {
             this._render(injected);
@@ -407,8 +466,53 @@ export default class LumenExtension extends Extension {
 
         if (result.provider === APPLICATION_PROVIDER)
             this._launchApplication(result, newWindow);
+        else if (SHELL_PROVIDERS.has(result.provider))
+            this._activateSystem(result);
         else
             this._activateWithEngine(result);
+    }
+
+    // Lock, suspend, log out and the setting toggles: only the shell can do these, so they never
+    // reach the engine's Activate. A destructive row (log out) arms on the first press and runs on
+    // the second; everything else acts immediately. A disabled row says why instead of doing
+    // nothing.
+    _activateSystem(result) {
+        const action = result.actions?.[0] ?? null;
+
+        if (!action) {
+            this._reportFailure(result.subtitle
+                ? `${result.title}: ${result.subtitle}`
+                : `${result.title} is not available`);
+            return;
+        }
+
+        if (!this._system) {
+            this._reportFailure(`${result.title} is not available right now`);
+            return;
+        }
+
+        const destructive = action.id === 'confirm' || result.preview?.destructive === true;
+        if (destructive && this._confirmation !== result.id) {
+            this._confirmation = result.id;
+            this._overlay?.setStatus(`${result.title}: press Enter again to confirm`);
+            return;
+        }
+        this._confirmation = null;
+
+        const verb = actionVerbFromResultId(result.id);
+        const key = settingKeyFromResultId(result.id);
+        const failure = verb
+            ? this._system.perform(verb)
+            : key
+                ? this._system.toggle(key)
+                : `${result.title} is not something Lumen can run`;
+
+        if (failure) {
+            this._reportFailure(failure);
+            return;
+        }
+
+        this._overlay?.close();
     }
 
     _launchApplication(result, newWindow) {
@@ -545,7 +649,12 @@ function variantsOf(results) {
 
 function variantsOfFields(fields) {
     const variant = {};
-    for (const [key, value] of Object.entries(fields ?? {}))
-        variant[key] = new GLib.Variant('s', String(value));
+    for (const [key, value] of Object.entries(fields ?? {})) {
+        // Preview fields are strings (§6); the flags the actions and toggles add (destructive,
+        // disabled) are booleans and stay booleans across the daemon round trip.
+        variant[key] = typeof value === 'boolean'
+            ? new GLib.Variant('b', value)
+            : new GLib.Variant('s', String(value ?? ''));
+    }
     return variant;
 }
