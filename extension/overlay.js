@@ -2,13 +2,26 @@
 // front of it. Everything here is shell-only (St/Clutter/Main); the testable model lives in
 // lib/. Ticket 03 grows a results list and preview inside `card`; ticket 04 fills the preview
 // pane below the list (its contents come from lib/preview.js); ticket 15 places the backdrop and
-// the card on the monitor under the pointer (lib/monitors.js decides which one).
+// the card on the monitor under the pointer (lib/monitors.js decides which one). Ticket 14 names
+// every part for a screen reader, gives the parts an Atk role, and gates the card's entrance
+// animation on the user's motion preference (lib/a11y.js decides both).
 
+import Atk from 'gi://Atk';
 import Clutter from 'gi://Clutter';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
+import {
+    CARD_ACCESSIBLE_NAME,
+    ENTRY_ACCESSIBLE_NAME,
+    HIGH_CONTRAST_CLASS,
+    PREVIEW_ACCESSIBLE_NAME,
+    RESULTS_ACCESSIBLE_NAME,
+    accessibleNameFor,
+    sectionAccessibleName,
+    shouldAnimate,
+} from './lib/a11y.js';
 import {ENGINE_NOT_RUNNING} from './lib/engine.js';
 import {centeredOrigin, pickMonitor} from './lib/monitors.js';
 import {buildPreview, PREVIEW_EMPTY_TEXT} from './lib/preview.js';
@@ -17,6 +30,9 @@ const CARD_MAX_WIDTH = 640;
 const MONITOR_MARGIN = 80;
 const ROW_ICON_SIZE = 24;
 const FALLBACK_ICON = 'application-x-executable';
+// Short enough to read as a settle, long enough that the card is visibly moving when motion is
+// allowed — and never run at all when the user asked for less of it.
+const FADE_DURATION_MS = 140;
 
 export class LumenOverlay {
     constructor({onClose = null, onActivate = null, onKey = null} = {}) {
@@ -37,6 +53,9 @@ export class LumenOverlay {
         this._appearance = 'system';
         this._systemSettings = null;
         this._systemSettingsId = 0;
+        // Motion is allowed until the shell says otherwise, which is GNOME's own default.
+        this._shouldAnimate = true;
+        this._highContrast = false;
 
         this._card = new St.BoxLayout({
             style_class: 'lumen-card',
@@ -44,6 +63,10 @@ export class LumenOverlay {
             reactive: true,
             spacing: 4,
         });
+        // A modal search surface for a screen reader: the card is the thing that appeared, and
+        // everything below it hangs off it.
+        this._card.set_accessible_role(Atk.Role.DIALOG);
+        this._card.set_accessible_name(CARD_ACCESSIBLE_NAME);
 
         this._entry = new St.Entry({
             style_class: 'lumen-entry',
@@ -51,18 +74,24 @@ export class LumenOverlay {
             can_focus: true,
             hint_text: 'Search…',
         });
+        this._entry.set_accessible_role(Atk.Role.ENTRY);
+        this._entry.set_accessible_name(ENTRY_ACCESSIBLE_NAME);
 
         this._status = new St.Label({
             style_class: 'lumen-status',
             x_expand: true,
             text: ENGINE_NOT_RUNNING,
         });
+        this._status.set_accessible_role(Atk.Role.LABEL);
+        this._status.set_accessible_name(ENGINE_NOT_RUNNING);
 
         this._results = new St.BoxLayout({
             style_class: 'lumen-results',
             vertical: true,
             x_expand: true,
         });
+        this._results.set_accessible_role(Atk.Role.LIST);
+        this._results.set_accessible_name(RESULTS_ACCESSIBLE_NAME);
 
         this._scroll = new St.ScrollView({
             style_class: 'lumen-scroll',
@@ -84,6 +113,10 @@ export class LumenOverlay {
             x_expand: true,
             visible: false,
         });
+        // The pane is a region of its own, so a screen reader announces it as one instead of
+        // reading its rows as more results.
+        this._preview.set_accessible_role(Atk.Role.PANEL);
+        this._preview.set_accessible_name(PREVIEW_ACCESSIBLE_NAME);
 
         this._previewTitle = new St.Label({
             style_class: 'lumen-preview-title',
@@ -167,6 +200,7 @@ export class LumenOverlay {
         this._syncGeometry();
         this._entry.set_text('');
         this._backdrop.show();
+        this._fadeIn();
 
         this._grab = Main.pushModal(this._backdrop) ?? null;
         this._entry.grab_key_focus();
@@ -175,6 +209,34 @@ export class LumenOverlay {
             'captured-event', (...args) => this._onCapturedEvent(...args));
         this._keyFocusId = global.stage.connect(
             'notify::key-focus', () => this._onKeyFocusChanged());
+    }
+
+    // The card's entrance. With motion allowed the card settles in; without it the card is simply
+    // there, which is the whole of reduced motion here (lib/a11y.js decides; contract §18). Only
+    // the entrance animates — closing is immediate, so a grab released in `close()` is never held
+    // by an animation that is still running.
+    _fadeIn() {
+        const card = this._card;
+        if (!card)
+            return;
+
+        if (!this._shouldAnimate) {
+            card.set_opacity(255);
+            return;
+        }
+
+        try {
+            card.remove_transition?.('opacity');
+            card.set_opacity(0);
+            card.ease({
+                opacity: 255,
+                duration: FADE_DURATION_MS,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
+        } catch (error) {
+            logError(error, 'Lumen: could not animate the overlay in');
+            card.set_opacity(255);
+        }
     }
 
     close() {
@@ -211,7 +273,22 @@ export class LumenOverlay {
 
     /** The one line under the entry: engine state, or why an activation failed. */
     setStatus(text) {
-        this._status.set_text(text ?? '');
+        const message = text ?? '';
+        this._status.set_text(message);
+        // The status line is where a failure or the engine state is reported, so a screen reader
+        // needs to read it as well as see it.
+        this._status.set_accessible_name(message);
+    }
+
+    /**
+     * The user's accessibility preferences, from lib/a11y.js's `accessibilityState`: whether motion
+     * is allowed and whether the desktop is in high contrast. Either can change while the overlay is
+     * open, so this reaches the live actors rather than only the next open.
+     */
+    setAccessibility(state = {}) {
+        this._shouldAnimate = shouldAnimate(state);
+        this._highContrast = state?.highContrast === true;
+        this._applyHighContrast();
     }
 
     /**
@@ -244,11 +321,7 @@ export class LumenOverlay {
 
         let index = topHit ? 1 : 0;
         for (const section of sections) {
-            this._results.add_child(new St.Label({
-                style_class: 'lumen-section-header',
-                text: section.label ?? section.provider ?? '',
-                x_align: Clutter.ActorAlign.START,
-            }));
+            this._results.add_child(this._createSectionHeader(section));
             for (const item of section.items ?? [])
                 this._results.add_child(this._createRow(item, index++));
         }
@@ -380,6 +453,21 @@ export class LumenOverlay {
         return row;
     }
 
+    // A labelled group of rows. The header is read out as a heading, named from the section's own
+    // label (lib/a11y.js), so the sections are distinguishable when the list is walked by a reader.
+    _createSectionHeader(section) {
+        const label = section?.label ?? section?.provider ?? '';
+        const header = new St.Label({
+            style_class: 'lumen-section-header',
+            text: label,
+            x_align: Clutter.ActorAlign.START,
+        });
+
+        header.set_accessible_role(Atk.Role.HEADING);
+        header.set_accessible_name(sectionAccessibleName(section));
+        return header;
+    }
+
     _createRow(result, index) {
         const row = new St.BoxLayout({
             style_class: 'lumen-row',
@@ -389,6 +477,11 @@ export class LumenOverlay {
             track_hover: true,
             spacing: 10,
         });
+
+        // The row is what a reader lands on, so it carries the list-item role and a name built
+        // from the title and the subtitle it shows.
+        row.set_accessible_role(Atk.Role.LIST_ITEM);
+        row.set_accessible_name(accessibleNameFor(result));
 
         row.add_child(new St.Icon({
             style_class: 'lumen-row-icon',
@@ -511,6 +604,18 @@ export class LumenOverlay {
             this._backdrop.add_style_class_name('lumen-appearance-dark');
         else if (dark === false)
             this._backdrop.add_style_class_name('lumen-appearance-light');
+    }
+
+    // High contrast is a style class on the backdrop, next to the appearance classes, so the
+    // stylesheet can raise the contrast of the card and everything inside it (ticket 14).
+    _applyHighContrast() {
+        if (!this._backdrop)
+            return;
+
+        if (this._highContrast)
+            this._backdrop.add_style_class_name(HIGH_CONTRAST_CLASS);
+        else
+            this._backdrop.remove_style_class_name(HIGH_CONTRAST_CLASS);
     }
 
     // What the desktop asked for, or `null` when it cannot be asked. A desktop that has never been

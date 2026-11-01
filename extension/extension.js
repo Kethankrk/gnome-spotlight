@@ -10,11 +10,19 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {LumenOverlay} from './overlay.js';
 import {LumenSystem} from './system.js';
 import {EngineStatus, engineState, ENGINE_NOT_RUNNING} from './lib/engine.js';
+import {
+    A11Y_SCHEMA,
+    ANIMATIONS_KEY,
+    HIGH_CONTRAST_KEY,
+    INTERFACE_SCHEMA,
+    REDUCED_MOTION_KEY,
+    accessibilityState,
+} from './lib/a11y.js';
 import {BUS_NAME, OBJECT_PATH, INTERFACE, SUPPORTED_MAJOR} from './lib/protocol.js';
 import {buildRequest, hasSecondWindowModifier} from './lib/query.js';
 import {buildViewModel} from './lib/viewmodel.js';
-import {createNavigator} from './lib/navigation.js';
-import {DEFAULT_PAGE_SIZE, intentFor} from './lib/keys.js';
+import {createNavigator, sectionStarts} from './lib/navigation.js';
+import {DEFAULT_PAGE_SIZE, hasShift, intentFor} from './lib/keys.js';
 import {appCandidates, appIdFromResultId} from './lib/apps.js';
 import {
     ACTION_PROVIDER,
@@ -54,6 +62,11 @@ export default class LumenExtension extends Extension {
         this._sampler = createClipboardSampler();
         this._captureTimerId = 0;
         this._confirmation = null;
+        this._interfaceSettings = null;
+        this._a11ySettings = null;
+        this._animationsChangedId = 0;
+        this._reducedMotionChangedId = 0;
+        this._highContrastChangedId = 0;
 
         this._overlay = new LumenOverlay({
             onClose: () => this._onOverlayClosed(),
@@ -92,6 +105,22 @@ export default class LumenExtension extends Extension {
             `changed::${CLIPBOARD_KEY}`, () => this._onClipboardSettingChanged());
         this._applyAppearance();
 
+        // Accessibility (ticket 14). Reduced motion and high contrast are the desktop's settings,
+        // not Lumen's: they are read here, observed, and handed to the overlay, which applies them
+        // to whatever it has built. Two schemas — `org.gnome.desktop.a11y.interface` owns
+        // `high-contrast` and the GNOME 50 `reduced-motion` enum, while the global animation switch
+        // `enable-animations` lives in `org.gnome.desktop.interface` (both are honoured; see
+        // lib/a11y.js).
+        this._interfaceSettings = this._openDesktopSettings(INTERFACE_SCHEMA);
+        this._a11ySettings = this._openDesktopSettings(A11Y_SCHEMA);
+        this._animationsChangedId = this._interfaceSettings?.connect(
+            `changed::${ANIMATIONS_KEY}`, () => this._applyAccessibility()) ?? 0;
+        this._reducedMotionChangedId = this._a11ySettings?.connect(
+            `changed::${REDUCED_MOTION_KEY}`, () => this._applyAccessibility()) ?? 0;
+        this._highContrastChangedId = this._a11ySettings?.connect(
+            `changed::${HIGH_CONTRAST_KEY}`, () => this._applyAccessibility()) ?? 0;
+        this._applyAccessibility();
+
         this._watcherId = Gio.bus_watch_name(
             Gio.BusType.SESSION,
             BUS_NAME,
@@ -125,6 +154,20 @@ export default class LumenExtension extends Extension {
         this._providersChangedId = 0;
         this._clipboardChangedId = 0;
         this._settings = null;
+
+        for (const [settings, id] of [
+            [this._interfaceSettings, this._animationsChangedId],
+            [this._a11ySettings, this._reducedMotionChangedId],
+            [this._a11ySettings, this._highContrastChangedId],
+        ]) {
+            if (id)
+                settings.disconnect(id);
+        }
+        this._animationsChangedId = 0;
+        this._reducedMotionChangedId = 0;
+        this._highContrastChangedId = 0;
+        this._interfaceSettings = null;
+        this._a11ySettings = null;
 
         if (this._keybindingBound) {
             Main.wm.removeKeybinding(SUMMON_KEYBINDING);
@@ -168,6 +211,48 @@ export default class LumenExtension extends Extension {
     // dark-mode toggle drives the desktop's colour scheme instead (§7d), which `system` follows.
     _applyAppearance() {
         this._overlay?.setAppearance(this._settings?.get_string(APPEARANCE_KEY) ?? 'system');
+    }
+
+    // A desktop schema that is not installed is not a failure: the overlay is perfectly usable
+    // without it, and `accessibilityState` then keeps GNOME's own defaults.
+    _openDesktopSettings(schemaId) {
+        try {
+            return new Gio.Settings({schema_id: schemaId});
+        } catch (error) {
+            logError(error, `Lumen: no ${schemaId}, keeping the desktop's defaults`);
+            return null;
+        }
+    }
+
+    // The accessibility preferences, folded by lib/a11y.js into the two booleans the overlay
+    // applies: motion, and high contrast. Re-run whenever one of them changes, so a running
+    // overlay stops animating the moment the preference lands.
+    _applyAccessibility() {
+        const state = accessibilityState({
+            enableAnimations: this._readBoolean(this._interfaceSettings, ANIMATIONS_KEY),
+            reducedMotion: this._readString(this._a11ySettings, REDUCED_MOTION_KEY),
+            highContrast: this._readBoolean(this._a11ySettings, HIGH_CONTRAST_KEY),
+        });
+
+        this._overlay?.setAccessibility(state);
+    }
+
+    // A key that is missing, or of a type this build does not expect, is left unanswered rather
+    // than guessed at.
+    _readBoolean(settings, key) {
+        try {
+            return settings?.get_boolean(key);
+        } catch {
+            return undefined;
+        }
+    }
+
+    _readString(settings, key) {
+        try {
+            return settings?.get_string(key);
+        } catch {
+            return undefined;
+        }
     }
 
     _toggleOverlay() {
@@ -518,10 +603,12 @@ export default class LumenExtension extends Extension {
         const view = buildViewModel(results);
         const previous = this._navigator?.current ?? 0;
 
-        // Activation is by row index, and a row index is a `flat` index.
+        // Activation is by row index, and a row index is a `flat` index. `sectionStarts` reports
+        // where each section begins in that order, which is what Tab and Shift+Tab walk.
         this._results = view.flat;
         this._navigator = createNavigator(view.flat.length, {
             pageSize: DEFAULT_PAGE_SIZE,
+            sections: sectionStarts(view),
             onChange: index => this._overlay?.setSelected(index),
         });
         this._overlay?.setResults(view);
@@ -531,7 +618,11 @@ export default class LumenExtension extends Extension {
     }
 
     _onKey(keyval, modifiers) {
-        const intent = intentFor(keyval, {pageSize: DEFAULT_PAGE_SIZE});
+        // Shift has to come out of the modifier mask: on Wayland Shift+Tab keeps the Tab keyval.
+        const intent = intentFor(keyval, {
+            pageSize: DEFAULT_PAGE_SIZE,
+            shift: hasShift(modifiers),
+        });
         const navigator = this._navigator;
 
         if (!intent || !navigator)
@@ -543,6 +634,12 @@ export default class LumenExtension extends Extension {
             return true;
         case 'prev':
             navigator.prev();
+            return true;
+        case 'next-section':
+            navigator.nextSection();
+            return true;
+        case 'prev-section':
+            navigator.prevSection();
             return true;
         case 'first':
             navigator.first();

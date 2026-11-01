@@ -16,10 +16,21 @@ export const KEYS = {
 
 export const DEFAULT_PAGE_SIZE = 8;
 
+// `Clutter.ModifierType.SHIFT_MASK`, spelled as the number for the same reason the keyvals are:
+// on Wayland Shift+Tab arrives as the Tab keyval with this bit set, so the modifier is the only
+// thing that distinguishes it from Tab.
+export const SHIFT_MASK = 1 << 0;
+
+/** Whether Shift is held in a Clutter (`Clutter.ModifierType`) modifier mask. */
+export function hasShift(modifiers) {
+    return (Number(modifiers ?? 0) & SHIFT_MASK) !== 0;
+}
+
 /**
  * The intent of a key press, or null for a key the list does not use. `pageSize` is accepted so
- * callers can pass one options object; the navigator owns the step it actually takes.
- * Ticket 14 grows the section-aware Tab intents.
+ * callers can pass one options object; the navigator owns the step it actually takes. Tab and
+ * Shift+Tab move between sections (ticket 14); `next`/`prev` stay the row-by-row movement the
+ * arrows use.
  */
 export function intentFor(keyval, options = {}) {
     const shift = options?.shift ?? false;
@@ -41,9 +52,9 @@ export function intentFor(keyval, options = {}) {
     case KEYS.KpEnter:
         return 'activate';
     case KEYS.Tab:
-        return shift ? 'prev' : 'next';
+        return shift ? 'prev-section' : 'next-section';
     case KEYS.IsoLeftTab:
-        return 'prev';
+        return 'prev-section';
     default:
         return null;
     }
