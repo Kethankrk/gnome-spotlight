@@ -5,10 +5,13 @@
 //! daemon's lifetime to any client.
 
 pub mod dbus;
+pub mod excludes;
+pub mod index;
 pub mod protocol;
 pub mod providers;
 pub mod ranking;
 pub mod registry;
 
 pub use dbus::{serve, Config, Serving};
+pub use index::{FileHit, FileIndex};
 pub use registry::{Indexer, Registry};

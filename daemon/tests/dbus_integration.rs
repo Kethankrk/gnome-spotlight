@@ -5,8 +5,8 @@ mod support;
 use std::collections::HashMap;
 
 use futures_util::StreamExt;
+use support::{block, connect, engine_proxy, injected, injected_options, name_is_owned, Harness};
 use zbus::OwnedVariant;
-use support::{block, connect, engine_proxy, name_is_owned, Harness};
 
 /// `a{sv}`, the shape of `Query`'s `options` argument.
 type Options = HashMap<String, zbus::OwnedVariant>;
@@ -182,30 +182,7 @@ fn second_daemon_loses_the_name_race_and_exits() {
     assert!(first.terminate().success());
 }
 
-fn ov_str(value: &str) -> OwnedVariant {
-    OwnedVariant::try_from(zbus::Variant::from(value.to_string())).expect("an owned string")
-}
-
-fn injected(id: &str, provider: &str, title: &str) -> HashMap<String, OwnedVariant> {
-    HashMap::from([
-        ("id".to_string(), ov_str(id)),
-        ("provider".to_string(), ov_str(provider)),
-        ("title".to_string(), ov_str(title)),
-    ])
-}
-
-fn injected_options(rows: Vec<HashMap<String, OwnedVariant>>) -> Options {
-    let array: Vec<OwnedVariant> = rows.into_iter().map(OwnedVariant::from).collect();
-    let variant = zbus::Variant::from(array);
-    let mut options = Options::new();
-    options.insert(
-        "injected".to_string(),
-        OwnedVariant::try_from(variant).expect("an owned a{sv} array"),
-    );
-    options
-}
-
-fn text_of(row: &HashMap<String, OwnedVariant>, key: &str) -> String {
+fn text_of(row: &HashMap<String, zbus::OwnedVariant>, key: &str) -> String {
     String::try_from(row[key].try_clone().expect("cloneable")).expect("a string")
 }
 
