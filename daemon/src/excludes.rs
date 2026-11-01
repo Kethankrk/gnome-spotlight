@@ -70,19 +70,14 @@ pub fn escape_literal(text: &str) -> String {
     out
 }
 
-/// How well a file name matches the needle: the scorer's vocabulary, so a file result is ranked
-/// on the same scale as every other provider's.
-pub fn quality(name: &str, needle: &str) -> f64 {
-    ranking::match_quality(name, needle)
-}
-
 /// Order hits best-match-first, then by path so the order is stable. Hits that do not match at
-/// all are dropped.
+/// all are dropped. Match quality is the scorer's own vocabulary (`ranking::match_quality`), so a
+/// file result is ranked on the same scale as every other provider's.
 pub fn rank(hits: Vec<FileHit>, needle: &str) -> Vec<FileHit> {
     let mut ranked: Vec<(f64, FileHit)> = hits
         .into_iter()
         .filter_map(|hit| {
-            let score = quality(&hit.name, needle);
+            let score = ranking::match_quality(&hit.name, needle);
             (score > 0.0).then_some((score, hit))
         })
         .collect();
@@ -278,15 +273,6 @@ mod tests {
             "{}",
             query.name_only_sparql()
         );
-    }
-
-    #[test]
-    fn matching_uses_the_scorers_quality_and_drops_unrelated_names() {
-        assert_eq!(quality("readme", "readme"), 1.0, "exact");
-        assert_eq!(quality("Report.md", "report"), 0.8, "prefix");
-        assert!(quality("Report.md", "rep") > quality("My Report.md", "rep"));
-        assert_eq!(quality("Report.md", "zzz"), 0.0);
-        assert_eq!(quality("Report.md", ""), 0.0);
     }
 
     #[test]

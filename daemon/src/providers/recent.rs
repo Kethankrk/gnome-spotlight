@@ -15,29 +15,24 @@ use zbus::Variant;
 
 use crate::excludes;
 use crate::protocol::{Action, ResultItem, Row};
-use crate::providers::files::{self, MAX_LIMIT};
-use crate::providers::{Provider, QueryRequest};
+use crate::providers::files::{folder_label, icon_for};
+use crate::providers::{page_size, Provider, QueryRequest};
+use crate::ranking;
 use crate::recent::{self, RecentEntry};
 
 /// How many recent documents a query returns unless the caller asks for something else: the
 /// extension's recent-section cap.
 pub const DEFAULT_LIMIT: usize = 4;
 
-/// Resolve the requested page size: the caller's limit if it sent one, clamped to [`MAX_LIMIT`],
-/// and never zero.
-pub fn resolve_limit(requested: Option<usize>) -> usize {
-    requested.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
-}
-
 /// One recent document as a contract §3 result: `recent:<path>`, the file name as the title, and
 /// the §6 preview `{kind:'recent',path,size,mtime,folder}`.
 pub fn result_for(entry: &RecentEntry, home: &str) -> ResultItem {
     let path = entry.path.to_string_lossy().into_owned();
-    let folder = files::folder_label(&entry.path, home);
+    let folder = folder_label(&entry.path, home);
 
     let mut item = ResultItem::new("recent", format!("recent:{path}"), entry.name.clone());
     item.subtitle = folder.clone();
-    item.icon = files::icon_for(&entry.name, false).to_string();
+    item.icon = icon_for(&entry.name, false).to_string();
     // Enter opens the document; that is the only thing a recent row offers (contract §3).
     item.actions = vec![Action::new("open", "Open", "open")];
     item.preview = Row::from([
@@ -125,7 +120,7 @@ impl Provider for Recent {
             // one.
             .filter(|entry| !excludes::is_excluded(&entry.path))
             .filter_map(|entry| {
-                let quality = excludes::quality(&entry.name, needle);
+                let quality = ranking::match_quality(&entry.name, needle);
                 (quality > 0.0).then_some((quality, entry))
             })
             .collect();
@@ -140,7 +135,7 @@ impl Provider for Recent {
         matching
             .into_iter()
             .skip(request.offset)
-            .take(resolve_limit(request.limit))
+            .take(page_size(request.limit, DEFAULT_LIMIT))
             .map(|(_, entry)| result_for(&entry, &self.home))
             .collect()
     }
@@ -461,13 +456,5 @@ mod tests {
 
         let all = recent.query(&QueryRequest::new("report", Vec::new()).with_paging(Some(100), 0));
         assert_eq!(all.len(), 7, "a caller may ask for more, up to the cap");
-    }
-
-    #[test]
-    fn the_requested_page_size_is_clamped() {
-        assert_eq!(resolve_limit(None), DEFAULT_LIMIT);
-        assert_eq!(resolve_limit(Some(0)), 1);
-        assert_eq!(resolve_limit(Some(3)), 3);
-        assert_eq!(resolve_limit(Some(1000)), MAX_LIMIT);
     }
 }

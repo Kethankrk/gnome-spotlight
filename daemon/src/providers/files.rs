@@ -16,19 +16,11 @@ use zbus::Variant;
 use crate::excludes;
 use crate::index::{FileHit, FileIndex};
 use crate::protocol::{Action, ResultItem, Row};
-use crate::providers::{Provider, QueryRequest};
+use crate::providers::{page_size, Provider, QueryRequest};
 
 /// How many file hits a query returns unless the caller asks for something else: the extension's
 /// files-section cap, so a broad query such as a single letter cannot flood the list.
 pub const DEFAULT_LIMIT: usize = 8;
-/// The most a caller can ask for, however large a limit it passes.
-pub const MAX_LIMIT: usize = 30;
-
-/// Resolve the requested page size: the caller's limit if it sent one, clamped to [`MAX_LIMIT`],
-/// and never zero.
-pub fn resolve_limit(requested: Option<usize>) -> usize {
-    requested.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
-}
 
 /// The themed icon name for a hit.
 pub fn icon_for(name: &str, is_folder: bool) -> &'static str {
@@ -153,7 +145,7 @@ impl Provider for Files {
             return Vec::new();
         }
 
-        let limit = resolve_limit(request.limit);
+        let limit = page_size(request.limit, DEFAULT_LIMIT);
         self.index
             .search(needle, limit, request.offset)
             // The index applies the same rules, and must; this is the check that holds even if a
@@ -359,14 +351,6 @@ mod tests {
 
         let all = files.query(&QueryRequest::new("report", Vec::new()).with_paging(Some(100), 0));
         assert_eq!(all.len(), 12, "a caller may ask for more, up to the cap");
-    }
-
-    #[test]
-    fn the_requested_page_size_is_clamped() {
-        assert_eq!(resolve_limit(None), DEFAULT_LIMIT);
-        assert_eq!(resolve_limit(Some(0)), 1);
-        assert_eq!(resolve_limit(Some(3)), 3);
-        assert_eq!(resolve_limit(Some(1000)), MAX_LIMIT);
     }
 
     #[test]
