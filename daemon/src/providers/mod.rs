@@ -1,0 +1,69 @@
+//! The provider seam.
+//!
+//! Every result source — the daemon's own (files, recent, clipboard, calculator, websearch) and
+//! the ones the extension computes and injects — is reached through [`Provider`]. Tests inject
+//! fakes here instead of standing up LocalSearch or a clipboard store.
+
+use crate::protocol::ResultItem;
+
+/// What a provider is asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QueryRequest {
+    /// The raw query text, as typed.
+    pub text: String,
+    /// Provider ids the caller wants results from; empty means "no restriction beyond the
+    /// registry's own availability".
+    pub enabled: Vec<String>,
+}
+
+impl QueryRequest {
+    pub fn new(text: impl Into<String>, enabled: Vec<String>) -> Self {
+        Self {
+            text: text.into(),
+            enabled,
+        }
+    }
+
+    /// Whether this request wants results from `provider`.
+    pub fn wants(&self, provider: &str) -> bool {
+        self.enabled.is_empty() || self.enabled.iter().any(|id| id == provider)
+    }
+}
+
+/// A source of results.
+pub trait Provider: Send + Sync + 'static {
+    /// The contract id of this provider (one of [`crate::protocol::PROVIDER_IDS`]).
+    fn id(&self) -> &'static str;
+
+    /// Whether this provider can answer at runtime, given the machine it is running on.
+    fn available(&self) -> bool;
+
+    /// Results for `request`, in any order: the registry ranks them.
+    fn query(&self, request: &QueryRequest) -> Vec<ResultItem>;
+}
+
+/// A provider with no data source yet. Every later ticket replaces one of these.
+pub struct Stub {
+    id: &'static str,
+    available: bool,
+}
+
+impl Stub {
+    pub fn new(id: &'static str, available: bool) -> Self {
+        Self { id, available }
+    }
+}
+
+impl Provider for Stub {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn available(&self) -> bool {
+        self.available
+    }
+
+    fn query(&self, _request: &QueryRequest) -> Vec<ResultItem> {
+        Vec::new()
+    }
+}

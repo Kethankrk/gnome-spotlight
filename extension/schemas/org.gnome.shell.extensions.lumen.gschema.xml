@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.lumen" path="/org/gnome/shell/extensions/lumen/">
+    <key name="summon-shortcut" type="s">
+      <default>'&lt;Super&gt;space'</default>
+      <summary>Shortcut that summons Lumen</summary>
+    </key>
+    <key name="appearance" type="s">
+      <default>'system'</default>
+      <summary>Appearance: system, light or dark</summary>
+    </key>
+    <key name="search-engine" type="s">
+      <default>'https://duckduckgo.com/?q=%s'</default>
+      <summary>URL template for the web-search row (%s is the query)</summary>
+    </key>
+    <key name="providers-enabled" type="as">
+      <default>['applications', 'files', 'recent', 'clipboard', 'calculator', 'actions', 'settings', 'websearch']</default>
+      <summary>Enabled result providers</summary>
+    </key>
+    <key name="clipboard-enabled" type="b">
+      <default>false</default>
+      <summary>Record clipboard history</summary>
+    </key>
+    <key name="result-limit" type="i">
+      <default>30</default>
+      <summary>Maximum number of results</summary>
+    </key>
+  </schema>
+</schemalist>
