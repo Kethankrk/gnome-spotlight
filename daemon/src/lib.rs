@@ -4,6 +4,7 @@
 //! `org.gnome.Lumen.Engine`. The extension is the only intended client; nothing here ties the
 //! daemon's lifetime to any client.
 
+pub mod calc;
 pub mod dbus;
 pub mod protocol;
 pub mod providers;

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::protocol::{ResultItem, CAPABILITY_IDS, PROVIDER_IDS};
-use crate::providers::{Provider, QueryRequest, Stub};
+use crate::providers::{calculator::Calculator, Provider, QueryRequest, Stub};
 use crate::ranking;
 
 /// How the daemon reaches LocalSearch/TinySPARQL. The indexer is behind its own seam so that the
@@ -30,15 +30,10 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The registry a ticket-01 daemon runs: every provider present, none of them wired up yet.
+    /// The registry a daemon runs: every provider present. The calculator is wired to its real
+    /// implementation; the rest are stubs until their ticket lands.
     pub fn with_stubs(indexer: &Indexer) -> Self {
-        let providers = PROVIDER_IDS
-            .iter()
-            .map(|id| {
-                let available = is_available(id, indexer);
-                Box::new(Stub::new(id, available)) as Box<dyn Provider>
-            })
-            .collect();
+        let providers = PROVIDER_IDS.iter().map(|id| build(id, indexer)).collect();
 
         Self { providers }
     }
@@ -116,6 +111,15 @@ fn is_available(id: &str, indexer: &Indexer) -> bool {
     }
 }
 
+/// The provider behind a contract id: the calculator is real, the rest are stubs until their
+/// ticket lands.
+fn build(id: &'static str, indexer: &Indexer) -> Box<dyn Provider> {
+    match id {
+        "calculator" => Box::new(Calculator::new()),
+        other => Box::new(Stub::new(other, is_available(other, indexer))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +154,49 @@ mod tests {
         let registry = Registry::with_stubs(&Indexer::Fake { seed: None });
         let request = QueryRequest::new("nautilus", vec!["files".to_string()]);
         assert!(registry.query(&request).is_empty());
+    }
+
+    #[test]
+    fn an_expression_scores_the_calculators_base_weight_and_is_alone() {
+        let registry = Registry::with_stubs(&Indexer::None);
+
+        let results = registry.query_at(&QueryRequest::new("2 + 2", Vec::new()), 0);
+        assert_eq!(results.len(), 1, "one candidate, and no error row");
+        assert_eq!(results[0].provider, "calculator");
+        assert_eq!(results[0].id, "calc:2 + 2");
+        assert!(
+            (results[0].score - 0.40).abs() < 1e-9,
+            "base weight 0.40 + no title match, got {}",
+            results[0].score
+        );
+    }
+
+    #[test]
+    fn a_query_that_is_not_an_expression_leaves_the_calculator_silent() {
+        let registry = Registry::with_stubs(&Indexer::None);
+        for text in ["nautilus", "2 +", "abc 123", "10 km"] {
+            assert!(
+                registry
+                    .query_at(&QueryRequest::new(text, Vec::new()), 0)
+                    .is_empty(),
+                "`{text}` must produce nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn an_injected_application_does_not_outrank_a_recognised_expression() {
+        let registry = Registry::with_stubs(&Indexer::None);
+        let mut app = ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files");
+        app.score = 0.30;
+        let request = QueryRequest::new("2 + 2", Vec::new()).with_injected(vec![app]);
+
+        let results = registry.query_at(&request, 0);
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].provider, "calculator",
+            "the calculator is the Top Hit for a query that parses"
+        );
     }
 
     #[test]
