@@ -154,6 +154,8 @@ fn second_daemon_loses_the_name_race_and_exits() {
 
     let mut second = std::process::Command::new(env!("CARGO_BIN_EXE_lumen-daemon"))
         .env("DBUS_SESSION_BUS_ADDRESS", &address)
+        // This test is about the name, not the store: keep it off the disk and off the keyring.
+        .args(["--clipboard", "memory"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

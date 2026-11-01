@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use lumen_daemon::store::ClipboardMode;
 use lumen_daemon::{dbus, Indexer};
 
 const USAGE: &str = "\
@@ -14,6 +15,10 @@ Options:
       --dbus-name <NAME>    well-known session bus name to own [default: org.gnome.Lumen]
       --object-path <PATH>  object path to export the engine at [default: /org/gnome/Lumen]
       --indexer <SPEC>      none | fake[:<seed-file>] | localsearch  [default: none]
+      --clipboard <SPEC>    persist | memory  [default: persist]
+                            `persist` keeps the history encrypted under
+                            $XDG_DATA_HOME/lumen/clipboard.bin, with the key in the login keyring;
+                            it falls back to memory, with a reason, when either is unavailable.
   -h, --help                print this help
   -V, --version             print the version
 
@@ -23,6 +28,8 @@ Environment:
                             `search-engine` key is read from it (no schema means DuckDuckGo)
   LUMEN_FAKE_INDEX          seed file for `--indexer fake` when the flag is not given
   LUMEN_TINYSPARQL_LIB      library path for `--indexer localsearch` (testing seam)
+  LUMEN_SECRET_KEY_FILE     read the clipboard encryption key from this file instead of the login
+                            keyring (testing seam)
 
 The installer passes `--indexer localsearch` so the daemon searches the system's file index;
 without it the daemon serves every other provider and reports no `files` capability.
@@ -118,6 +125,7 @@ fn parse_args(args: &[String]) -> Result<Outcome, String> {
                 config.indexer = parse_indexer(&take_value(&mut rest)?)?;
                 saw_indexer = true;
             }
+            "--clipboard" => config.clipboard = parse_clipboard(&take_value(&mut rest)?)?,
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -156,6 +164,16 @@ fn parse_indexer(spec: &str) -> Result<Indexer, String> {
             seed: Some(PathBuf::from(seed)),
         }),
         Some((kind, _)) => Err(format!("unknown indexer `{kind}`")),
+    }
+}
+
+/// `persist` (the default) writes the encrypted history to the XDG data directory; `memory` never
+/// touches the disk, which is what the test harness and a locked-down session ask for.
+fn parse_clipboard(spec: &str) -> Result<ClipboardMode, String> {
+    match spec {
+        "persist" | "persistent" | "disk" => Ok(ClipboardMode::Persistent),
+        "memory" | "none" => Ok(ClipboardMode::Memory),
+        other => Err(format!("unknown clipboard mode `{other}`")),
     }
 }
 
@@ -227,6 +245,21 @@ mod tests {
         assert_eq!(config.dbus_name, "org.gnome.Lumen");
         assert_eq!(config.object_path, "/org/gnome/Lumen");
         assert_eq!(config.indexer, Indexer::None);
+        assert_eq!(config.clipboard, ClipboardMode::Persistent);
+    }
+
+    #[test]
+    fn the_clipboard_spec_selects_the_store() {
+        assert_eq!(
+            run_config(&["--clipboard", "memory"]).clipboard,
+            ClipboardMode::Memory
+        );
+        assert_eq!(
+            run_config(&["--clipboard=persist"]).clipboard,
+            ClipboardMode::Persistent
+        );
+        assert!(parse_args(&args(&["--clipboard", "somewhere-else"])).is_err());
+        assert!(parse_args(&args(&["--clipboard"])).is_err());
     }
 
     #[test]

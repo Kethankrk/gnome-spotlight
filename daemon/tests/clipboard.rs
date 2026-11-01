@@ -1,8 +1,13 @@
 //! Clipboard history at the D-Bus seam: the real daemon binary, a real session bus, a real client.
 //!
 //! History is off until the user turns it on. While it is off nothing is recorded, `ClipboardList`
-//! is empty, and the results carry one row that says so instead of an error. Nothing reaches the
-//! filesystem at this stage: persistence is ticket 11.
+//! is empty, and the results carry one row that says so instead of an error.
+//!
+//! The history is persisted (ticket 11) as soon as it changes, encrypted under a key held outside
+//! the data directory, so the last three tests here run the daemon with `--clipboard persist`,
+//! their own throw-away `HOME`/XDG tree and their own key file. Every other test runs with
+//! `--clipboard memory` — the harness's default — so a run on a developer's session bus cannot
+//! reach their data directory or their keyring.
 
 mod support;
 
@@ -366,22 +371,104 @@ fn clipboard_changed_announces_every_change_of_the_history() {
 }
 
 #[test]
-fn nothing_reaches_the_filesystem() {
-    // The daemon is given a throw-away HOME and XDG tree; recording copies must leave them empty.
-    // Persistence, and with it a data directory, is ticket 11.
-    let root = std::env::temp_dir().join(format!("lumen-clipboard-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("a scratch home");
-    let home = root.to_str().expect("a utf-8 path").to_string();
+fn the_history_is_encrypted_on_disk_and_survives_a_restart() {
+    let scratch = Scratch::new("restart");
 
-    let harness = Harness::spawn_with_env(&[], &[
-        ("HOME", &home),
-        ("XDG_DATA_HOME", &format!("{home}/data")),
-        ("XDG_CONFIG_HOME", &format!("{home}/config")),
-        ("XDG_STATE_HOME", &format!("{home}/state")),
-        ("XDG_CACHE_HOME", &format!("{home}/cache")),
-        ("XDG_RUNTIME_DIR", &format!("{home}/run")),
-    ]);
+    // ---- a first daemon: record two copies, and try to record a secret ----
+    let (listed, refused, clean_exit) = {
+        let mut harness = scratch.spawn(&["--clipboard", "persist"]);
+        let address = harness.address().to_string();
+        let name = harness.name().to_string();
+
+        let (listed, refused) = block(async move {
+            let connection = connect(&address).await.expect("connect to the bus");
+            let proxy = engine_proxy(&connection, &name).await.expect("engine proxy");
+            set_enabled(&proxy, true).await;
+
+            push(&proxy, "the first copy", 1_000).await;
+            let refused = push(&proxy, "password=hunter2", 1_500).await;
+            push(&proxy, "the second copy", 2_000).await;
+            (list(&proxy).await, refused)
+        });
+
+        (listed, refused, harness.terminate().success())
+    };
+
+    assert_eq!(
+        titles(&listed),
+        vec!["the second copy".to_string(), "the first copy".to_string()],
+        "the copies are recorded newest first"
+    );
+    assert!(!refused, "a copy that looks like a secret is refused");
+    assert!(
+        clean_exit,
+        "the daemon exits on SIGTERM: the history is written as it changes, not at the end"
+    );
+
+    // ---- what is on the disk is the history, but not readable ----
+    let on_disk = scratch.files();
+    let history = on_disk
+        .iter()
+        .find(|(path, _)| path.ends_with("lumen/clipboard.bin"))
+        .unwrap_or_else(|| panic!("the history file must exist, found {:?}", scratch.names()));
+    for needle in [
+        "the first copy",
+        "the second copy",
+        "hunter2",
+        "timestamp_ms",
+        "entries",
+    ] {
+        assert!(
+            !contains(&history.1, needle),
+            "`{needle}` is on disk in the clear"
+        );
+    }
+    for (path, bytes) in &on_disk {
+        assert!(
+            !contains(bytes, "the first copy") && !contains(bytes, "hunter2"),
+            "{path} holds clipboard text in the clear"
+        );
+    }
+
+    // ---- a second daemon, same data directory and key file: the history is back ----
+    let mut harness = scratch.spawn(&["--clipboard", "persist"]);
+    let address = harness.address().to_string();
+    let name = harness.name().to_string();
+
+    let (enabled, rows, matching) = block(async move {
+        let connection = connect(&address).await.expect("connect to the bus");
+        let proxy = engine_proxy(&connection, &name).await.expect("engine proxy");
+        let enabled: bool = proxy
+            .get_property("ClipboardEnabled")
+            .await
+            .expect("ClipboardEnabled");
+        let rows = list(&proxy).await;
+        let matching = query(&proxy, "second", &["clipboard"]).await;
+        (enabled, rows, matching)
+    });
+
+    assert!(enabled, "history comes back on after a restart");
+    assert_eq!(
+        titles(&rows),
+        vec!["the second copy".to_string(), "the first copy".to_string()],
+        "the history survived the restart"
+    );
+    assert_eq!(
+        titles(&matching),
+        vec!["the second copy".to_string()],
+        "and the restored entries are searchable"
+    );
+
+    harness.terminate();
+}
+
+#[test]
+fn a_corrupt_key_file_degrades_to_memory_and_says_so() {
+    let scratch = Scratch::new("corrupt-key");
+    // Present, but not a key: the daemon must not treat it as one, and must not fall over.
+    std::fs::write(scratch.key_file(), "not-a-key").expect("write a corrupt key file");
+
+    let mut harness = scratch.spawn(&["--clipboard", "persist"]);
     let address = harness.address().to_string();
     let name = harness.name().to_string();
 
@@ -389,42 +476,157 @@ fn nothing_reaches_the_filesystem() {
         let connection = connect(&address).await.expect("connect to the bus");
         let proxy = engine_proxy(&connection, &name).await.expect("engine proxy");
         set_enabled(&proxy, true).await;
-        push(&proxy, "a secret nobody should find on disk", 1_000).await;
+        push(&proxy, "recorded in memory", 1_000).await;
         list(&proxy).await
     });
-    assert_eq!(rows.len(), 1, "the entry is in memory, and listed");
-
-    let left_behind: Vec<String> = walk(&root);
-    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(
+        titles(&rows),
+        vec!["recorded in memory".to_string()],
+        "the daemon keeps serving, in memory"
+    );
     assert!(
-        left_behind.is_empty(),
-        "clipboard history must not touch the filesystem yet, found {left_behind:?}"
+        !scratch
+            .names()
+            .iter()
+            .any(|name| name.ends_with("clipboard.bin")),
+        "a degraded store writes no history: {:?}",
+        scratch.names()
+    );
+
+    assert!(harness.terminate().success());
+    let stderr = harness.stderr();
+    assert!(
+        stderr.contains("in memory only"),
+        "the reason is on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("64 hex characters"),
+        "and it names the problem: {stderr}"
     );
 }
 
-/// Every path under `root`, relative to it.
-fn walk(root: &std::path::Path) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
+#[test]
+fn a_secret_looking_copy_is_refused_and_never_written() {
+    let scratch = Scratch::new("secret");
 
-    while let Some(directory) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            found.push(
-                path.strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-            if path.is_dir() {
-                pending.push(path);
-            }
-        }
+    let mut harness = scratch.spawn(&["--clipboard", "persist"]);
+    let address = harness.address().to_string();
+    let name = harness.name().to_string();
+
+    let (refused, ordinary, rows) = block(async move {
+        let connection = connect(&address).await.expect("connect to the bus");
+        let proxy = engine_proxy(&connection, &name).await.expect("engine proxy");
+        set_enabled(&proxy, true).await;
+
+        let refused = push(&proxy, "-----BEGIN OPENSSH PRIVATE KEY-----", 1_000).await;
+        let ordinary = push(&proxy, "the quick brown fox", 2_000).await;
+        (refused, ordinary, list(&proxy).await)
+    });
+
+    assert!(!refused, "a private key is not history");
+    assert!(ordinary, "ordinary text still is");
+    assert_eq!(titles(&rows), vec!["the quick brown fox".to_string()]);
+
+    assert!(harness.terminate().success());
+    for (path, bytes) in scratch.files() {
+        assert!(
+            !contains(&bytes, "OPENSSH PRIVATE KEY"),
+            "{path} holds the private key in the clear"
+        );
+    }
+}
+
+/// A throw-away `HOME` and XDG tree, with the key file the daemon reads its key from — so a test
+/// never writes to the developer's data directory or their keyring.
+struct Scratch {
+    root: std::path::PathBuf,
+    env: Vec<(String, String)>,
+}
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "lumen-clipboard-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch home");
+
+        let home = root.to_str().expect("a utf-8 path").to_string();
+        let env = vec![
+            ("HOME".to_string(), home.clone()),
+            ("XDG_DATA_HOME".to_string(), format!("{home}/data")),
+            ("XDG_CONFIG_HOME".to_string(), format!("{home}/config")),
+            ("XDG_STATE_HOME".to_string(), format!("{home}/state")),
+            ("XDG_CACHE_HOME".to_string(), format!("{home}/cache")),
+            ("XDG_RUNTIME_DIR".to_string(), format!("{home}/run")),
+            (
+                "LUMEN_SECRET_KEY_FILE".to_string(),
+                format!("{home}/key"),
+            ),
+        ];
+        Self { root, env }
     }
 
-    found.sort();
-    found
+    /// Where the daemon reads (and creates) its encryption key.
+    fn key_file(&self) -> std::path::PathBuf {
+        self.root.join("key")
+    }
+
+    fn spawn(&self, extra: &[&str]) -> Harness {
+        let env: Vec<(&str, &str)> = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        Harness::spawn_with_env(extra, &env)
+    }
+
+    /// Every name under the scratch tree, relative to it.
+    fn names(&self) -> Vec<String> {
+        self.files().into_iter().map(|(path, _)| path).collect()
+    }
+
+    /// Every file under the scratch tree, with its bytes.
+    fn files(&self) -> Vec<(String, Vec<u8>)> {
+        let mut found = Vec::new();
+        let mut pending = vec![self.root.clone()];
+
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    found.push((
+                        path.strip_prefix(&self.root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .into_owned(),
+                        bytes,
+                    ));
+                }
+            }
+        }
+
+        found.sort();
+        found
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Whether `haystack` contains `needle` as bytes.
+fn contains(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
 }
