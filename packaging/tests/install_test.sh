@@ -277,6 +277,36 @@ leftover=$(find "$HOME4" -mindepth 1 | head -n 5)
 expect_eq 'a home that had no user data is left completely empty' "${leftover:-}" ''
 
 # ---------------------------------------------------------------------------------------------
+printf '\n== an update restarts the running service ==\n'
+
+# `systemctl --user enable --now` leaves an already-running unit alone, so an update used to keep
+# the old daemon binary serving until the next login. The installer must restart it.
+FAKE_SYSTEMCTL=$SCRATCH/systemctl
+cat >"$FAKE_SYSTEMCTL" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+exit 0
+EOF
+chmod +x "$FAKE_SYSTEMCTL"
+
+HOME5=$(new_home restart)
+SYSTEMCTL_LOG=$SCRATCH/systemctl.log
+export SYSTEMCTL_LOG
+: >"$SYSTEMCTL_LOG"
+# A version this scenario builds itself: re-tarring an older one would change its checksum while
+# SHA256SUMS still held the first one.
+make_release 0.3.0
+HOME=$HOME5 XDG_DATA_HOME=$HOME5/.local/share XDG_CONFIG_HOME=$HOME5/.config \
+    XDG_BIN_HOME=$HOME5/.local/bin LUMEN_SYSTEMCTL="$FAKE_SYSTEMCTL" \
+    sh "$INSTALLER" --archive "$SCRATCH/lumen-0.3.0-x86_64.tar.gz" \
+    --sha256sums "$SCRATCH/SHA256SUMS" >"$SCRATCH/restart.out" 2>&1
+expect_eq 'the install exits 0 with a systemctl' "$?" '0'
+expect_contains 'it reloads the user manager' "$SYSTEMCTL_LOG" '--user daemon-reload'
+expect_contains 'it enables the unit' "$SYSTEMCTL_LOG" 'enable lumen.service'
+expect_contains 'and restarts it, so an update does not keep the old binary' \
+    "$SYSTEMCTL_LOG" 'restart lumen.service'
+
+# ---------------------------------------------------------------------------------------------
 printf '\n== the installer explains itself ==\n'
 
 sh "$INSTALLER" --help >"$SCRATCH/installer-help.out" 2>&1

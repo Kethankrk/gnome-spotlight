@@ -393,7 +393,12 @@ enable_service() {
     }
 
     "$systemctl" --user daemon-reload || note 'could not reload the systemd user manager'
-    if ! "$systemctl" --user enable --now "$UNIT_NAME"; then
+    if ! "$systemctl" --user enable "$UNIT_NAME"; then
+        note "could not enable $UNIT_NAME; it will come up at your next login"
+    fi
+    # `enable --now` would leave an already-running unit alone, so an update would keep serving
+    # the old binary. `restart` starts it when it is stopped and replaces it when it is running.
+    if ! "$systemctl" --user restart "$UNIT_NAME"; then
         note "could not start $UNIT_NAME now; it will come up at your next login"
     fi
 }
