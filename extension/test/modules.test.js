@@ -40,6 +40,33 @@ test('the preview pane is built from lib/preview.js, not in the shell glue', () 
     assert.match(overlay, /this\._model\[index\]/);
 });
 
+test('the overlay places itself through lib/monitors.js, not a fixed primary monitor', () => {
+    const overlay = read('overlay.js');
+    assert.match(overlay, /from '\.\/lib\/monitors\.js'/);
+    assert.match(overlay, /pickMonitor\(/);
+    assert.match(overlay, /centeredOrigin\(/);
+
+    // The shell supplies what a pure module cannot see: the monitor list, the primary and the
+    // pointer.
+    assert.match(overlay, /Main\.layoutManager\.monitors/);
+    assert.match(overlay, /Main\.layoutManager\.primaryMonitor/);
+    assert.match(overlay, /global\.get_pointer\(\)/);
+
+    // A monitor added or removed re-runs the geometry while the overlay lives, and destroy()
+    // disconnects it (contract §10: plain connect()/disconnect(), no connectObject).
+    assert.match(overlay, /'monitors-changed'/);
+    assert.match(overlay, /disconnect\(this\._monitorsChangedId\)/);
+
+    // `_syncGeometry` is the single place that positions things: the backdrop and the card.
+    const definition = overlay.slice(overlay.indexOf('_syncGeometry() {'));
+    const body = definition.slice(0, definition.indexOf('\n    _pointer()'));
+    assert.match(body, /pickMonitor\(/);
+    assert.match(body, /centeredOrigin\(/);
+    assert.equal(body.match(/set_position\(/g)?.length, 2,
+        'the backdrop and the card are positioned in `_syncGeometry` and nowhere else');
+    assert.equal(overlay.match(/set_position\(/g)?.length, 2);
+});
+
 test('the protocol constants match the shipped schema and metadata', () => {
     const schema = read('schemas', `${SCHEMA_ID}.gschema.xml`);
     assert.match(schema, new RegExp(`id="${SCHEMA_ID}"`));
