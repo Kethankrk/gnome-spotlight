@@ -1,0 +1,4 @@
+# .agent-todo/config.toml (committed)
+version = 1
+project = "LRM"
+default_group = "LRM-1"
