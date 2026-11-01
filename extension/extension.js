@@ -19,7 +19,13 @@ import {
     accessibilityState,
 } from './lib/a11y.js';
 import {BUS_NAME, OBJECT_PATH, INTERFACE, SUPPORTED_MAJOR} from './lib/protocol.js';
-import {buildRequest, hasControlModifier, hasSecondWindowModifier} from './lib/query.js';
+import {
+    DEFAULT_RESULT_LIMIT,
+    buildRequest,
+    clampResultLimit,
+    hasControlModifier,
+    hasSecondWindowModifier,
+} from './lib/query.js';
 import {activationAction} from './lib/activation.js';
 import {buildViewModel} from './lib/viewmodel.js';
 import {createNavigator, sectionStarts} from './lib/navigation.js';
@@ -43,6 +49,9 @@ const APPEARANCE_KEY = 'appearance';
 const CLIPBOARD_KEY = 'clipboard-enabled';
 const RESULT_LIMIT_KEY = 'result-limit';
 const APPLICATION_PROVIDER = 'applications';
+// The one provider whose rows are paged by count, so the offset of the next page is how many of
+// them are already loaded (contract §11).
+const FILE_PROVIDER = 'files';
 // Providers the shell resolves itself: the daemon ranks them, but only the shell can run them.
 const SHELL_PROVIDERS = new Set([ACTION_PROVIDER, SETTINGS_PROVIDER]);
 // The `delete` action a clipboard entry carries (§11): the Delete key is what runs it, and
@@ -63,6 +72,10 @@ export default class LumenExtension extends Extension {
         this._activeSearch = null;
         this._awaitingResults = false;
         this._results = [];
+        // The daemon's own results for the query on screen, and how many of them are file rows —
+        // the offset of the next page (contract §11).
+        this._loaded = [];
+        this._loadedFiles = 0;
         this._navigator = null;
         this._apps = null;
         this._clipboard = St.Clipboard.get_default();
@@ -193,6 +206,8 @@ export default class LumenExtension extends Extension {
         this._overlay = null;
         this._navigator = null;
         this._results = [];
+        this._loaded = [];
+        this._loadedFiles = 0;
         this._apps = null;
         this._clipboard = null;
         this._sampler = null;
@@ -355,10 +370,13 @@ export default class LumenExtension extends Extension {
         this._overlay?.setEngineState(state);
         this._syncClipboardCapture();
 
-        if (state.status !== EngineStatus.OK)
+        if (state.status !== EngineStatus.OK) {
+            this._loaded = [];
+            this._loadedFiles = 0;
             this._render([]);
-        else if (changed && this._overlay?.entry.get_text())
+        } else if (changed && this._overlay?.entry.get_text()) {
             this._onQueryChanged();
+        }
     }
 
     _dropProxy() {
@@ -551,7 +569,9 @@ export default class LumenExtension extends Extension {
     }
 
     // The query pipeline: shell-owned candidates go to the daemon, which ranks them with its own.
-    _onQueryChanged() {
+    // `offset` asks for a later page of the daemon's own paging providers (contract §11); the first
+    // page of a new query starts from scratch, and a page is merged into what is already loaded.
+    _onQueryChanged({offset = 0} = {}) {
         this._activeSearch = null;
         this._awaitingResults = false;
         this._confirmation = null;
@@ -560,6 +580,11 @@ export default class LumenExtension extends Extension {
             this._overlay?.entry.get_text() ?? '',
             this._settings?.get_strv(PROVIDERS_KEY) ?? [],
         );
+
+        if (offset === 0) {
+            this._loaded = [];
+            this._loadedFiles = 0;
+        }
 
         if (request.text === '') {
             this._overlay?.setStatus(this._engine.message);
@@ -574,10 +599,14 @@ export default class LumenExtension extends Extension {
             return;
         }
 
-        const call = new GLib.Variant(
-            '(sasa{sv})',
-            [request.text, request.enabled, {injected: variantsOf(injected)}],
-        );
+        const options = {
+            injected: variantsOf(injected),
+            limit: new GLib.Variant('u', clampResultLimit(this._settings?.get_int(RESULT_LIMIT_KEY))),
+        };
+        if (offset > 0)
+            options.offset = new GLib.Variant('u', offset);
+
+        const call = new GLib.Variant('(sasa{sv})', [request.text, request.enabled, options]);
 
         this._awaitingResults = true;
         this._proxy.call('Query', call, Gio.DBusCallFlags.NONE, -1, null, (proxy, result) => {
@@ -589,6 +618,22 @@ export default class LumenExtension extends Extension {
                 this._overlay?.setStatus('the engine refused the query');
             }
         });
+    }
+
+    // PageDown on a list that is already showing results asks for the next page: the offset is how
+    // many file rows are on screen, which is where the daemon's file provider left off, and the
+    // page is merged into them. Without an engine there is nothing to page from.
+    _requestNextPage() {
+        if (this._shutdown || !this._overlay?.isOpen)
+            return;
+
+        if (this._engine.status !== EngineStatus.OK || !this._proxy)
+            return;
+
+        if (this._loadedFiles === 0)
+            return;
+
+        this._onQueryChanged({offset: this._loadedFiles});
     }
 
     _onResultsChanged(parameters) {
@@ -603,11 +648,18 @@ export default class LumenExtension extends Extension {
         if (searchId !== this._activeSearch)
             return;
 
-        this._render(resultsFromRows(rows));
+        const page = resultsFromRows(rows);
+        this._loaded = mergeById(this._loaded, page);
+        this._loadedFiles = this._loaded.filter(result => result.provider === FILE_PROVIDER).length;
+        this._render(this._loaded);
     }
 
     _render(results) {
-        const view = buildViewModel(results);
+        // The files section is capped by the page the user asked for (contract §11, §20), never
+        // below the contract's own cap, so a second page is visible rather than discarded.
+        const view = buildViewModel(results, {
+            caps: {files: Math.max(DEFAULT_RESULT_LIMIT, this._loadedFiles)},
+        });
         const previous = this._navigator?.current ?? 0;
 
         // Activation is by row index, and a row index is a `flat` index. `sectionStarts` reports
@@ -659,6 +711,7 @@ export default class LumenExtension extends Extension {
             return true;
         case 'page-down':
             navigator.pageDown(DEFAULT_PAGE_SIZE);
+            this._requestNextPage();
             return true;
         case 'activate':
             if (navigator.current < 0)
@@ -1072,4 +1125,12 @@ function variantsOfFields(fields) {
             : new GLib.Variant('s', String(value ?? ''));
     }
     return variant;
+}
+
+// A page of results joined to the ones already loaded, by result id: the daemon answers a later
+// page with the same ranking applied to a later slice, so the same row can arrive twice. The
+// viewmodel sorts what it is given, so the order here only has to be stable.
+function mergeById(loaded, page) {
+    const seen = new Set((loaded ?? []).map(result => result.id));
+    return [...(loaded ?? []), ...(page ?? []).filter(result => !seen.has(result.id))];
 }

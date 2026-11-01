@@ -91,7 +91,9 @@ test('the preferences window edits the schema keys through lib/shortcut.js', () 
 
     // Every key the ticket names is edited, and written straight through: no Apply button.
     const schema = read('schemas', `${SCHEMA_ID}.gschema.xml`);
-    for (const key of ['summon-shortcut', 'appearance', 'providers-enabled', 'clipboard-enabled']) {
+    for (const key of [
+        'summon-shortcut', 'appearance', 'search-engine', 'providers-enabled', 'clipboard-enabled',
+    ]) {
         assert.match(prefs, new RegExp(`'${key}'`), `prefs.js does not edit ${key}`);
         assert.match(schema, new RegExp(`name="${key}"`), `the schema has no ${key}`);
     }
@@ -149,6 +151,20 @@ test('the activation path picks the action by modifier and runs the shell action
     assert.match(extension, /ClipboardDelete/);
     assert.match(extension, /ClipboardClear/);
     assert.match(read('lib', 'keys.js'), /Delete: 0xffff/);
+});
+
+test('result-limit is sent and PageDown asks for the next page of files', () => {
+    const extension = read('extension.js');
+
+    // The schema's `result-limit` is what the daemon is asked for, clamped to what it accepts.
+    assert.match(extension, /result-limit/);
+    assert.match(extension, /clampResultLimit\(/);
+    assert.match(extension, /limit: new GLib\.Variant\('u'/);
+    // PageDown asks for the next page by offset, so the key is not dead.
+    assert.match(extension, /options\.offset = new GLib\.Variant\('u', offset\)/);
+    assert.match(extension, /_requestNextPage\(/);
+    // The files section has to be able to show the page that was asked for.
+    assert.match(read('lib', 'viewmodel.js'), /caps\?\.\[provider\]/);
 });
 
 test('the stylesheet themes the overlay for a light and a dark card', () => {

@@ -53,3 +53,17 @@ export function buildRequest(text, enabledProviders = PROVIDER_IDS) {
     const enabled = new Set(enabledProviders ?? []);
     return {text: trimmed, enabled: PROVIDER_IDS.filter(id => enabled.has(id))};
 }
+
+// One page of results (§11): the schema's `result-limit`, which is also the most the daemon will
+// return however large a limit it is sent. The files section is capped by it, so raising the
+// preference shows more files, and PageDown asks for the next page beyond it.
+export const DEFAULT_RESULT_LIMIT = 30;
+export const MAX_RESULT_LIMIT = 30;
+
+/** The stored `result-limit` as a page size: a whole number of results, 1..[`MAX_RESULT_LIMIT`]. */
+export function clampResultLimit(limit) {
+    if (typeof limit !== 'number' || !Number.isFinite(limit))
+        return DEFAULT_RESULT_LIMIT;
+
+    return Math.max(1, Math.min(Math.trunc(limit), MAX_RESULT_LIMIT));
+}

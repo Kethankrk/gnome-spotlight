@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 
 import {
     COPY_MODIFIER,
+    DEFAULT_RESULT_LIMIT,
+    MAX_RESULT_LIMIT,
     REVEAL_MODIFIER,
     buildRequest,
+    clampResultLimit,
     hasCopyModifier,
     hasRevealModifier,
     hasSecondWindowModifier,
@@ -63,4 +66,16 @@ test('the reveal and copy modifiers are the bits a file row reads', () => {
     assert.equal(hasCopyModifier(0), false);
     assert.equal(hasCopyModifier(null), false);
     assert.equal(hasCopyModifier(undefined), false);
+});
+
+test('the page size the daemon is asked for is the schema\'s result-limit, clamped', () => {
+    assert.equal(clampResultLimit(30), 30);
+    assert.equal(clampResultLimit(1), 1);
+    assert.equal(clampResultLimit(0), 1, 'a page of nothing is not a page');
+    assert.equal(clampResultLimit(-5), 1);
+    assert.equal(clampResultLimit(1000), MAX_RESULT_LIMIT, 'the daemon clamps here too');
+    assert.equal(clampResultLimit(7.9), 7, 'a whole number of results');
+
+    for (const junk of [undefined, null, NaN, 'nonsense', {}, Infinity])
+        assert.equal(clampResultLimit(junk), DEFAULT_RESULT_LIMIT, `${junk} falls back`);
 });
