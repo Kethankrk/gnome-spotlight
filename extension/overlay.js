@@ -1,8 +1,8 @@
 // The summon overlay: a full-screen transparent backdrop with a translucent, rounded card in
 // front of it. Everything here is shell-only (St/Clutter/Main); the testable model lives in
 // lib/. Ticket 03 grows a results list and preview inside `card`; ticket 04 fills the preview
-// pane below the list (its contents come from lib/preview.js); ticket 15 moves the placement
-// from the primary monitor to the pointer's monitor.
+// pane below the list (its contents come from lib/preview.js); ticket 15 places the backdrop and
+// the card on the monitor under the pointer (lib/monitors.js decides which one).
 
 import Clutter from 'gi://Clutter';
 import St from 'gi://St';
@@ -10,6 +10,7 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {ENGINE_NOT_RUNNING} from './lib/engine.js';
+import {centeredOrigin, pickMonitor} from './lib/monitors.js';
 import {buildPreview, PREVIEW_EMPTY_TEXT} from './lib/preview.js';
 
 const CARD_MAX_WIDTH = 640;
@@ -27,7 +28,9 @@ export class LumenOverlay {
         this._keyFocusId = 0;
         this._capturedEventId = 0;
         this._monitorsChangedId = 0;
+        this._cardSizeId = 0;
         this._buttonPressId = 0;
+        this._syncing = false;
         this._rows = [];
         this._selectedRow = null;
         this._model = [];
@@ -37,8 +40,6 @@ export class LumenOverlay {
             vertical: true,
             reactive: true,
             spacing: 4,
-            x_align: Clutter.ActorAlign.CENTER,
-            y_align: Clutter.ActorAlign.CENTER,
         });
 
         this._entry = new St.Entry({
@@ -107,16 +108,22 @@ export class LumenOverlay {
         this._card.add_child(this._preview);
 
 
+        // A fixed layout, not a BinLayout: `_syncGeometry` is the single place that positions the
+        // card, so the layout must not re-centre it behind our back.
         this._backdrop = new St.Widget({
             style_class: 'lumen-backdrop',
             reactive: true,
             visible: false,
-            layout_manager: new Clutter.BinLayout(),
+            layout_manager: new Clutter.FixedLayout(),
         });
         this._backdrop.add_child(this._card);
 
+        // Adding or removing a monitor moves the overlay: recompute while the overlay lives (it is
+        // constructed in `enable` and destroyed in `disable`) and disconnect in `destroy`. The
+        // card's own height changes as rows come and go, and it is centred, so it moves with them.
         this._buttonPressId = this._backdrop.connect(
             'button-press-event', (...args) => this._onButtonPress(...args));
+        this._cardSizeId = this._card.connect('notify::height', () => this._syncGeometry());
         this._monitorsChangedId = Main.layoutManager.connect(
             'monitors-changed', () => this._syncGeometry());
 
@@ -253,6 +260,11 @@ export class LumenOverlay {
         if (this._monitorsChangedId) {
             Main.layoutManager.disconnect(this._monitorsChangedId);
             this._monitorsChangedId = 0;
+        }
+
+        if (this._cardSizeId) {
+            this._card?.disconnect(this._cardSizeId);
+            this._cardSizeId = 0;
         }
 
         if (this._buttonPressId) {
@@ -406,16 +418,49 @@ export class LumenOverlay {
             adjustment.set_value(bottom - page);
     }
 
-    // Ticket 15 replaces this with the monitor under the pointer.
+    // The one place that positions the card. The backdrop covers the monitor the overlay belongs
+    // on — the one under the pointer, else the primary, else the first (lib/monitors.js) — and the
+    // card is centred inside it. `centeredOrigin` gives screen coordinates, so the card (a child of
+    // the monitor-sized backdrop) is positioned relative to the monitor's top-left. Re-entrant
+    // calls are dropped: allocating the card can notify its height, which calls straight back here.
     _syncGeometry() {
-        const monitor = Main.layoutManager.primaryMonitor;
+        if (this._syncing)
+            return;
+
+        const monitors = Main.layoutManager.monitors ?? [];
+        const index = pickMonitor(monitors, this._pointer(), {
+            primary: Main.layoutManager.primaryMonitor ?? null,
+        });
+        const monitor = monitors[index] ?? null;
         if (!monitor)
             return;
 
-        this._backdrop.set_position(monitor.x, monitor.y);
-        this._backdrop.set_size(monitor.width, monitor.height);
-        this._card.set_width(
-            Math.min(CARD_MAX_WIDTH, Math.max(320, monitor.width - MONITOR_MARGIN)));
+        this._syncing = true;
+        try {
+            this._backdrop.set_position(monitor.x, monitor.y);
+            this._backdrop.set_size(monitor.width, monitor.height);
+
+            const width = Math.min(CARD_MAX_WIDTH, Math.max(320, monitor.width - MONITOR_MARGIN));
+            this._card.set_width(width);
+
+            const [, naturalHeight] = this._card.get_preferred_height(width);
+            const height = Math.max(0, naturalHeight || this._card.height || 0);
+            const origin = centeredOrigin(monitor, {width, height});
+
+            // The card cannot be taller than the monitor, so a card that would overflow anchors to
+            // the monitor's top instead of being clipped at both ends.
+            this._card.set_position(
+                Math.max(0, origin.x - monitor.x),
+                Math.max(0, Math.min(origin.y - monitor.y, monitor.height - height)));
+        } finally {
+            this._syncing = false;
+        }
+    }
+
+    /** The pointer in stage coordinates; lib/monitors.js ignores it when it is not a real point. */
+    _pointer() {
+        const [x, y] = global.get_pointer();
+        return {x, y};
     }
 
     _onCapturedEvent(_actor, event) {
