@@ -11,10 +11,11 @@ use std::thread;
 
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
 use zbus::object_server::SignalEmitter;
-use zbus::{interface, Connection, OwnedVariant};
+use zbus::{interface, Connection, OwnedVariant, Variant};
 
-use crate::protocol::{self, ResultItem, Rows};
+use crate::protocol::{self, ResultItem, Row, Rows};
 use crate::providers::clipboard::entry_row;
+use crate::providers::websearch::{self, Routes};
 use crate::providers::QueryRequest;
 use crate::registry::{Indexer, Registry};
 use crate::store::clipboard::ClipboardStore;
@@ -59,6 +60,77 @@ pub struct Engine {
     issued: Arc<AtomicU64>,
     /// The one clipboard history, shared with the clipboard provider inside the registry.
     clipboard: Arc<ClipboardStore>,
+    /// The urls the web-search rows this daemon offered point at, so `Activate` can route their
+    /// ids back to them (the id is `web:<sha1(url)>`, which cannot be reversed).
+    routes: Routes,
+}
+
+/// What `Activate` does with one (result, action) pair (contract §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Routing {
+    /// The daemon performed the action itself.
+    Handled,
+    /// The shell performs it: `shell_action` names it and `args` are its arguments. The daemon
+    /// does nothing with them — for `open-url` that is deliberate (contract §9: Lumen makes no
+    /// network request of its own; the shell opens the browser).
+    Shell { action: String, args: Vec<String> },
+}
+
+/// Why an `Activate` cannot be routed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unroutable {
+    /// A daemon-owned action whose handler lands with its own ticket (files 05, calculator 06,
+    /// clipboard 10). It is never handed to the shell: the shell cannot do it either.
+    NoHandler { provider: String, action: String },
+    /// No row with that id in this session. The table only holds what this daemon offered.
+    UnknownResult(String),
+}
+
+impl std::fmt::Display for Unroutable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoHandler { provider, action } => write!(
+                formatter,
+                "Lumen cannot perform `{action}` on a `{provider}` result yet"
+            ),
+            Self::UnknownResult(id) => write!(formatter, "Lumen does not know the result `{id}`"),
+        }
+    }
+}
+
+/// Route one action on one result (contract §2).
+///
+/// Daemon-owned actions are performed in the daemon; a shell action is *not* performed here but
+/// named in the reply, and the extension runs it. `open-url` is the only shell action so far.
+pub fn route(result_id: &str, action_id: &str, routes: &Routes) -> Result<Routing, Unroutable> {
+    match protocol::provider_of_id(result_id) {
+        Some(websearch::PROVIDER) if action_id == websearch::OPEN_ACTION => {
+            match routes.url_of(result_id) {
+                Some(url) => Ok(Routing::Shell {
+                    action: protocol::OPEN_URL.to_string(),
+                    args: vec![url],
+                }),
+                None => Err(Unroutable::UnknownResult(result_id.to_string())),
+            }
+        }
+        Some(provider) => Err(Unroutable::NoHandler {
+            provider: provider.to_string(),
+            action: action_id.to_string(),
+        }),
+        None => Err(Unroutable::UnknownResult(result_id.to_string())),
+    }
+}
+
+/// A routing outcome as the `a{sv}` `Activate` returns (contract §2).
+pub fn outcome_row(routing: Routing) -> Row {
+    match routing {
+        Routing::Handled => Row::from([("handled".to_string(), Variant::new(true))]),
+        Routing::Shell { action, args } => Row::from([
+            ("handled".to_string(), Variant::new(false)),
+            ("shell_action".to_string(), Variant::new(action)),
+            ("args".to_string(), Variant::new(args)),
+        ]),
+    }
 }
 
 #[interface(name = "org.gnome.Lumen.Engine")]
@@ -85,6 +157,16 @@ impl Engine {
     #[zbus(property)]
     fn set_clipboard_enabled(&self, enabled: bool) {
         self.clipboard.set_enabled(enabled);
+    }
+
+    /// Route one action on one result (contract §2).
+    ///
+    /// The daemon performs the actions it owns. A shell-only action is not performed here: the
+    /// reply carries `handled: false` with `shell_action` and `args`, and the extension runs it.
+    fn activate(&self, result_id: String, action_id: String) -> zbus::fdo::Result<Row> {
+        route(&result_id, &action_id, &self.routes)
+            .map(outcome_row)
+            .map_err(|unroutable| zbus::fdo::Error::NotSupported(unroutable.to_string()))
     }
 
     /// Start a search and return its id. Results arrive as signals.
@@ -209,11 +291,15 @@ pub async fn serve(config: Config) -> zbus::Result<Serving> {
     let issued = Arc::new(AtomicU64::new(0));
     let (jobs_tx, jobs_rx) = mpsc::channel();
 
+    // `Activate` routes through the same table the web-search rows are recorded in.
+    let routes = registry.websearch_routes();
+
     let engine = Engine {
         registry: Arc::clone(&registry),
         jobs: jobs_tx,
         issued: Arc::clone(&issued),
         clipboard,
+        routes,
     };
 
     let name = config.dbus_name.clone();
@@ -281,6 +367,7 @@ fn search_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{string_field, SHELL_ACTIONS};
 
     #[test]
     fn the_default_config_is_the_contract_identity() {
@@ -288,5 +375,112 @@ mod tests {
         assert_eq!(config.dbus_name, "org.gnome.Lumen");
         assert_eq!(config.object_path, "/org/gnome/Lumen");
         assert_eq!(config.indexer, Indexer::None);
+    }
+
+    // ---- `Activate` routing (ticket 08, contract §2) ----
+
+    fn routes_with(id: &str, url: &str) -> Routes {
+        let routes = Routes::new();
+        routes.remember(id, url);
+        routes
+    }
+
+    fn bool_field(row: &Row, key: &str) -> Option<bool> {
+        row.get(key).and_then(|value| bool::try_from(value).ok())
+    }
+
+    #[test]
+    fn a_web_row_is_routed_to_the_shell_that_opens_it() {
+        let routes = routes_with("web:abc", "https://duckduckgo.com/?q=x");
+
+        let routing = route("web:abc", "open", &routes).expect("the row routes");
+
+        assert_eq!(
+            routing,
+            Routing::Shell {
+                action: "open-url".to_string(),
+                args: vec!["https://duckduckgo.com/?q=x".to_string()],
+            },
+            "the daemon hands the url over instead of opening it (contract §2, §9)"
+        );
+        assert!(
+            SHELL_ACTIONS.contains(&"open-url"),
+            "and it is a shell action the contract names"
+        );
+    }
+
+    #[test]
+    fn the_daemon_never_opens_the_url_itself() {
+        let routing = Routing::Shell {
+            action: protocol::OPEN_URL.to_string(),
+            args: vec!["https://duckduckgo.com/?q=x".to_string()],
+        };
+
+        let row = outcome_row(routing);
+
+        assert_eq!(bool_field(&row, "handled"), Some(false));
+        assert_eq!(
+            string_field(&row, "shell_action").as_deref(),
+            Some("open-url")
+        );
+        assert_eq!(
+            Vec::<String>::try_from(row["args"].try_clone().expect("cloneable")).expect("as"),
+            vec!["https://duckduckgo.com/?q=x".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_handled_outcome_carries_nothing_but_handled() {
+        let row = outcome_row(Routing::Handled);
+
+        assert_eq!(bool_field(&row, "handled"), Some(true));
+        assert!(
+            !row.contains_key("shell_action") && !row.contains_key("args"),
+            "a performed action has nothing for the shell to do"
+        );
+    }
+
+    #[test]
+    fn a_daemon_owned_row_is_never_shell_routed() {
+        let routes = Routes::new();
+
+        for (id, provider) in [
+            ("file:/home/me/report.pdf", "files"),
+            ("calc:2 + 2", "calculator"),
+            ("clip:8d1", "clipboard"),
+            ("recent:file:///home/me/report.pdf", "recent"),
+        ] {
+            match route(id, "open", &routes) {
+                Err(Unroutable::NoHandler {
+                    provider: named,
+                    action,
+                }) => {
+                    assert_eq!(named, provider, "{id} belongs to {provider}");
+                    assert_eq!(action, "open");
+                }
+                other => panic!("{id} must not be routed: {other:?}"),
+            }
+        }
+
+        assert!(
+            route("app:org.gnome.Nautilus.desktop", "open", &routes).is_err(),
+            "applications never reach the engine's Activate"
+        );
+    }
+
+    #[test]
+    fn a_row_the_session_never_offered_is_refused() {
+        let routes = routes_with("web:abc", "https://duckduckgo.com/?q=x");
+
+        for id in ["web:def", "nonsense", ""] {
+            assert!(
+                matches!(route(id, "open", &routes), Err(Unroutable::UnknownResult(_))),
+                "`{id}` was never offered, so its url is unknown"
+            );
+        }
+        assert!(
+            route("web:abc", "copy", &routes).is_err(),
+            "the web row offers exactly one action"
+        );
     }
 }

@@ -57,12 +57,16 @@ export function usageBonus(count) {
     return 0.20 * Math.min(count, USAGE_CAP) / USAGE_CAP;
 }
 
+// The web-search row is the exception: its title is spelled out of the query ("Search the web for
+// …"), so matching it against the query would always score it as a hit and float the last-resort
+// row above real results. It is scored by its base weight alone (ticket 08, contract §15).
 export function score(candidate, query, context = {}) {
     const provider = candidate.provider;
     const base = BASE_WEIGHT[provider] ?? 0.0;
     const now = context.now ?? Date.now();
+    const quality = provider === 'websearch' ? 0.0 : matchQuality(candidate.title, query);
     return base
-        + matchQuality(candidate.title, query)
+        + quality
         + recencyBonus(candidate.timestamp, now)
         + usageBonus(candidate.usage);
 }

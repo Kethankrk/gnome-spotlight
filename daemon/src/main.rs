@@ -19,6 +19,8 @@ Options:
 
 Environment:
   DBUS_SESSION_BUS_ADDRESS  the bus to serve on
+  GSETTINGS_SCHEMA_DIR      directory holding the compiled Lumen schema; the web-search row's
+                            `search-engine` key is read from it (no schema means DuckDuckGo)
   LUMEN_FAKE_INDEX          seed file for `--indexer fake` when the flag is not given
   LUMEN_TINYSPARQL_LIB      library path for `--indexer localsearch` (testing seam)
 

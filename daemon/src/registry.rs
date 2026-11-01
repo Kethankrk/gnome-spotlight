@@ -9,6 +9,7 @@ use crate::index;
 use crate::protocol::{ResultItem, CAPABILITY_IDS, PROVIDER_IDS};
 use crate::providers::calculator::Calculator;
 use crate::providers::clipboard::{self, ClipboardProvider};
+use crate::providers::websearch::{self, WebSearch};
 use crate::providers::{files, Provider, QueryRequest, Stub};
 use crate::ranking;
 use crate::store::clipboard::ClipboardStore;
@@ -29,6 +30,11 @@ pub enum Indexer {
 
 pub struct Registry {
     providers: Vec<Box<dyn Provider>>,
+    /// The same provider as the `websearch` entry in `providers`, kept here as well because the
+    /// registry consults it *last*, and only when [`websearch::should_offer`] says the row is
+    /// wanted — so the `search-engine` setting is read for a query that dead-ended rather than for
+    /// every keystroke. It also owns the url table `Activate` routes through.
+    websearch: WebSearch,
 }
 
 impl Registry {
@@ -40,7 +46,18 @@ impl Registry {
     /// the endpoint on this thread — before the bus name is owned, so the capability is right
     /// before the first client can ask. Later queries run on the search thread (see `dbus.rs`).
     pub fn new(indexer: &Indexer, clipboard: Arc<ClipboardStore>) -> Self {
+        Self::with_engine(indexer, clipboard, websearch::EngineSetting::from_environment())
+    }
+
+    /// [`Registry::new`] with the web-search row's engine setting replaced. The daemon reads the
+    /// setting from its environment (contract §8); tests read it through a runner they watch.
+    pub fn with_engine(
+        indexer: &Indexer,
+        clipboard: Arc<ClipboardStore>,
+        engine: websearch::EngineSetting,
+    ) -> Self {
         let index = index::open(indexer);
+        let websearch = WebSearch::new(engine);
         let providers: Vec<Box<dyn Provider>> = vec![
             Box::new(Stub::new("applications", false)),
             Box::new(files::Files::new(Arc::clone(&index))),
@@ -49,7 +66,7 @@ impl Registry {
             Box::new(Calculator::new()),
             Box::new(Stub::new("actions", false)),
             Box::new(Stub::new("settings", false)),
-            Box::new(Stub::new("websearch", true)),
+            Box::new(websearch.clone()),
         ];
         debug_assert_eq!(
             providers.iter().map(|p| p.id()).collect::<Vec<_>>(),
@@ -57,12 +74,21 @@ impl Registry {
             "the registry lists the providers in contract order"
         );
 
-        Self { providers }
+        Self {
+            providers,
+            websearch,
+        }
     }
 
     /// A registry with a fresh, empty clipboard history. Convenient for tests.
     pub fn with_stubs(indexer: &Indexer) -> Self {
         Self::new(indexer, Arc::new(ClipboardStore::new()))
+    }
+
+    /// The urls this registry's web rows point at, so `Activate` can route their ids back to them
+    /// (contract §2: the id is `web:<sha1(url)>`, which cannot be reversed).
+    pub fn websearch_routes(&self) -> websearch::Routes {
+        self.websearch.routes()
     }
 
     /// The provider ids the daemon knows, in contract order.
@@ -96,7 +122,11 @@ impl Registry {
         let mut items: Vec<ResultItem> = self
             .providers
             .iter()
-            .filter(|provider| provider.available() && request.wants(provider.id()))
+            .filter(|provider| {
+                provider.available()
+                    && provider.id() != websearch::PROVIDER
+                    && request.wants(provider.id())
+            })
             .flat_map(|provider| provider.query(request))
             .collect();
         items.extend(
@@ -106,6 +136,13 @@ impl Registry {
                 .filter(|item| request.wants(&item.provider))
                 .cloned(),
         );
+
+        // The web-search row is the daemon's last resort (story 30): every other provider has
+        // spoken by now, so this is the one place that can tell whether the query already found
+        // something worth showing.
+        if request.wants(websearch::PROVIDER) && websearch::should_offer(&items, &request.text) {
+            items.extend(self.websearch.query(request));
+        }
 
         for item in &mut items {
             item.score = ranking::score(item, &request.text, now_ms);
@@ -135,6 +172,12 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::websearch;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The engine the tests' settings runner answers with: not the contract default, so a
+    /// hard-coded template could not pass.
+    const ENGINE: &str = "https://searx.example/?q=%s";
 
     #[test]
     fn the_registry_lists_all_eight_providers() {
@@ -284,5 +327,153 @@ mod tests {
         let all = QueryRequest::new("x", Vec::new());
         assert!(all.wants("files"));
         assert!(all.wants("calculator"));
+    }
+
+    // ---- the web-search fallback (ticket 08) ----
+
+    /// A registry whose web-search row is built through a runner the test can watch.
+    fn watching_registry() -> (Registry, Arc<AtomicUsize>) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&reads);
+        let engine = websearch::EngineSetting::with_runner(
+            None,
+            Arc::new(move |_, _| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Some(format!("'{ENGINE}'").to_string())
+            }),
+        );
+        (
+            Registry::with_engine(&Indexer::None, Arc::new(ClipboardStore::new()), engine),
+            reads,
+        )
+    }
+
+    #[test]
+    fn a_query_that_matches_nothing_is_offered_a_web_search() {
+        let (registry, _) = watching_registry();
+        let request = QueryRequest::new("how tall is everest", vec![websearch::PROVIDER.to_string()]);
+
+        let results = registry.query(&request);
+
+        assert_eq!(results.len(), 1, "one row, and no error row");
+        assert_eq!(results[0].provider, "websearch");
+        assert_eq!(
+            results[0].id,
+            format!(
+                "web:{}",
+                websearch::sha1_hex("https://searx.example/?q=how%20tall%20is%20everest")
+            ),
+            "the id hashes the url the configured engine builds"
+        );
+        assert_eq!(results[0].title, "Search the web for how tall is everest");
+        assert!(
+            (results[0].score - 0.05).abs() < 1e-9,
+            "the last resort scores its base weight alone, got {}",
+            results[0].score
+        );
+    }
+
+    #[test]
+    fn a_strong_match_suppresses_the_web_search_row() {
+        let registry = Registry::with_stubs(&Indexer::None);
+        let enabled = vec!["applications".to_string(), websearch::PROVIDER.to_string()];
+
+        let strong = QueryRequest::new("files", enabled.clone()).with_injected(vec![ResultItem::new(
+            "applications",
+            "app:org.gnome.Nautilus.desktop",
+            "Files",
+        )]);
+        let providers: Vec<String> = registry
+            .query(&strong)
+            .into_iter()
+            .map(|item| item.provider)
+            .collect();
+        assert_eq!(
+            providers,
+            vec!["applications".to_string()],
+            "an exact application match means the user is not searching the web"
+        );
+
+        let weak = QueryRequest::new(
+            "term",
+            vec!["files".to_string(), websearch::PROVIDER.to_string()],
+        )
+        .with_injected(vec![ResultItem::new(
+            "files",
+            "file:/home/me/xterm-settings.txt",
+            "xterm-settings.txt",
+        )]);
+        let providers: Vec<String> = registry
+            .query(&weak)
+            .into_iter()
+            .map(|item| item.provider)
+            .collect();
+        assert_eq!(
+            providers,
+            vec!["files".to_string(), "websearch".to_string()],
+            "a substring match is weak: the row is still offered, and sorts last"
+        );
+    }
+
+    #[test]
+    fn an_empty_query_and_a_disabled_provider_get_no_web_row() {
+        let registry = Registry::with_stubs(&Indexer::None);
+
+        assert!(
+            registry
+                .query(&QueryRequest::new("   ", vec![websearch::PROVIDER.to_string()]))
+                .is_empty(),
+            "there is nothing to search the web for"
+        );
+        assert!(
+            registry
+                .query(&QueryRequest::new("how tall is everest", vec!["applications".to_string()]))
+                .is_empty(),
+            "a provider switched off in preferences is never asked"
+        );
+    }
+
+    #[test]
+    fn the_engine_setting_is_read_only_when_the_row_is_wanted() {
+        let (registry, reads) = watching_registry();
+
+        let matched = QueryRequest::new(
+            "files",
+            vec!["applications".to_string(), websearch::PROVIDER.to_string()],
+        )
+        .with_injected(vec![ResultItem::new(
+            "applications",
+            "app:org.gnome.Nautilus.desktop",
+            "Files",
+        )]);
+        registry.query(&matched);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "a query that matched something must not spawn a settings read"
+        );
+
+        let dead_end = QueryRequest::new("how tall is everest", vec![websearch::PROVIDER.to_string()]);
+        let results = registry.query(&dead_end);
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "and a dead end reads it once");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn the_registry_offers_the_url_its_web_rows_point_at() {
+        let (registry, _) = watching_registry();
+        let results = registry.query(&QueryRequest::new(
+            "how tall is everest",
+            vec![websearch::PROVIDER.to_string()],
+        ));
+
+        assert_eq!(
+            registry
+                .websearch_routes()
+                .url_of(&results[0].id)
+                .as_deref(),
+            Some("https://searx.example/?q=how%20tall%20is%20everest"),
+            "Activate routes the id back through the same table"
+        );
     }
 }
