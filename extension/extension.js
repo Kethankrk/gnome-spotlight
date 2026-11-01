@@ -43,9 +43,10 @@ import {createClipboardSampler, shouldCapture, SAMPLE_INTERVAL_SECONDS} from './
 import {updateNotification, updateStatus, versionFilePaths} from './lib/update.js';
 
 const SUMMON_KEYBINDING = 'summon-shortcut';
-// The shortcut is a GNOME custom shortcut that runs the CLI. A display keybinding added with
-// Main.wm.addKeybinding is not delivered by this shell build (five accelerators reported "bound"
-// and never fired), while this is the mechanism Settings → Keyboard → Custom Shortcuts uses.
+// The shortcut is a GNOME custom shortcut that runs the CLI. A display keybinding registered
+// through the window manager is not delivered by this shell build (five accelerators reported
+// "bound" and never fired), while this is the mechanism Settings → Keyboard → Custom Shortcuts
+// uses.
 const MEDIA_KEYS_SCHEMA = 'org.gnome.settings-daemon.plugins.media-keys';
 const CUSTOM_KEYBINDING_SCHEMA =
     'org.gnome.settings-daemon.plugins.media-keys.custom-keybinding';
