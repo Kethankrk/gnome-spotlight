@@ -420,8 +420,9 @@ export class LumenOverlay {
         this._model = [];
     }
 
-    // The pane follows the selection: `null` hides it, a result with no detail keeps it visible
-    // with the muted empty state (contract §6, story 53).
+    // The pane follows the selection. With nothing selected it stays in place but empty, so the
+    // card is the same height whether or not there are results — no jump when the first row lands
+    // (the list area is a fixed height in the stylesheet for the same reason).
     _setPreview(result) {
         if (!this._preview)
             return;
@@ -430,7 +431,10 @@ export class LumenOverlay {
             child.destroy();
 
         if (!result) {
-            this._preview.hide();
+            this._previewTitle.set_text('');
+            this._previewTitle.visible = false;
+            this._previewEmpty.visible = false;
+            this._preview.show();
             return;
         }
 

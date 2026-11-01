@@ -35,7 +35,7 @@
 }
 
 .lumen-scroll {
-    max-height: 360px;
+    height: 340px;
     margin-top: 2px;
 }
 
@@ -89,6 +89,7 @@
     margin-top: 8px;
     padding: 8px 8px 4px 8px;
     spacing: 6px;
+    min-height: 120px;
 }
 
 .lumen-preview-title {
