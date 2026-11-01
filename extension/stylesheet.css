@@ -79,3 +79,43 @@
     color: rgba(255, 255, 255, 0.6);
     font-size: 11px;
 }
+
+/* The preview pane sits under the result list and follows the selection. */
+.lumen-preview {
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    margin-top: 8px;
+    padding: 8px 8px 4px 8px;
+    spacing: 6px;
+}
+
+.lumen-preview-title {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: bold;
+}
+
+.lumen-preview-rows {
+    spacing: 4px;
+}
+
+.lumen-preview-row {
+    spacing: 10px;
+}
+
+.lumen-preview-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 11px;
+    min-width: 84px;
+    padding-top: 2px;
+}
+
+.lumen-preview-value {
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 12px;
+}
+
+.lumen-preview-empty {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 12px;
+    font-style: italic;
+}

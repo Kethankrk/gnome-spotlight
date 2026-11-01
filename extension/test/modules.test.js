@@ -31,6 +31,15 @@ test('the stylesheet styles every class the overlay asks for', () => {
         assert.match(css, new RegExp(`\\.${name}[\\s,{:]+`), `.${name} has no rule`);
 });
 
+test('the preview pane is built from lib/preview.js, not in the shell glue', () => {
+    const overlay = read('overlay.js');
+    assert.match(overlay, /from '\.\/lib\/preview\.js'/);
+    assert.match(overlay, /buildPreview\(/);
+    assert.match(overlay, /PREVIEW_EMPTY_TEXT/);
+    // Row index == flat index: the preview follows whatever `setSelected` selected.
+    assert.match(overlay, /this\._model\[index\]/);
+});
+
 test('the protocol constants match the shipped schema and metadata', () => {
     const schema = read('schemas', `${SCHEMA_ID}.gschema.xml`);
     assert.match(schema, new RegExp(`id="${SCHEMA_ID}"`));
