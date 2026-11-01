@@ -89,6 +89,13 @@ fn run(config: dbus::Config) -> ExitCode {
     println!("lumen-daemon {READY_MARKER}: name={name} path={path}");
     let _ = io::stdout().flush();
 
+    // The other readiness protocol: the shipped user unit is `Type=notify` (packaging/), so tell
+    // systemd the same thing. A session without systemd has no `NOTIFY_SOCKET`, and a failure to
+    // send is logged rather than fatal — serving on the bus is what actually matters.
+    if let Err(e) = lumen_daemon::notify::ready() {
+        eprintln!("lumen-daemon: could not notify systemd of readiness: {e}");
+    }
+
     wait_for_terminate(shutdown);
 
     let _ = zbus::block_on(serving.connection.release_name(serving.name.as_str()));

@@ -226,6 +226,20 @@ impl Engine {
         id
     }
 
+    /// Ask the shell to summon or dismiss the overlay (ticket 16).
+    ///
+    /// The daemon cannot render anything: the overlay lives inside `gnome-shell`, so this only
+    /// emits `ToggleRequested`, which the extension listens for. It is the one D-Bus entry point
+    /// `cli/lumen --toggle` needs, so a user can bind a second shortcut (or a mouse button, or a
+    /// launcher entry) to Lumen. Always succeeds; a shell that is not running ignores it.
+    async fn toggle(&self, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) {
+        let _ = emitter.toggle_requested().await;
+    }
+
+    /// Emitted by `Toggle()`. The extension toggles the overlay when it arrives.
+    #[zbus(signal)]
+    async fn toggle_requested(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
     #[zbus(signal)]
     async fn results_changed(
         emitter: &SignalEmitter<'_>,

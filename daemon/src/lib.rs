@@ -8,6 +8,7 @@ pub mod calc;
 pub mod dbus;
 pub mod excludes;
 pub mod index;
+pub mod notify;
 pub mod protocol;
 pub mod providers;
 pub mod ranking;
