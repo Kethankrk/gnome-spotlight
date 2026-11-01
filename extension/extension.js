@@ -220,13 +220,25 @@ export default class LumenExtension extends Extension {
             this._keybindingBound = false;
         }
 
-        Main.wm.addKeybinding(
+        const accelerator = this._settings?.get_string(SUMMON_KEYBINDING) ?? '';
+        // `addKeybinding` grabs silently: it returns Meta.KeyBindingAction.NONE when the
+        // accelerator is already owned by the desktop (Super+space is Switch input source; IBus
+        // takes Ctrl+space), and nothing else reports it. Keep the answer so a dead shortcut is
+        // visible instead of looking like a broken extension.
+        const action = Main.wm.addKeybinding(
             SUMMON_KEYBINDING,
             this._settings,
             Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
             Shell.ActionMode.ALL,
             () => this._toggleOverlay());
-        this._keybindingBound = true;
+        this._keybindingBound = action !== Meta.KeyBindingAction.NONE;
+
+        if (this._keybindingBound) {
+            log(`Lumen: summon shortcut bound to ${accelerator}`);
+        } else {
+            log(`Lumen: could not grab "${accelerator}" — the desktop already uses it. ` +
+                'Pick another shortcut in the preferences, or run `lumen --toggle`.');
+        }
     }
 
     // The `appearance` preference themes the overlay itself (system / light / dark). The launcher's
@@ -283,9 +295,12 @@ export default class LumenExtension extends Extension {
             return;
         }
 
-        if (Main.modalCount > 0)
+        if (Main.modalCount > 0) {
+            log('Lumen: a shell dialog is open, not summoning the overlay');
             return;
+        }
 
+        log('Lumen: summoning the overlay');
         this._apps = null;
         this._overlay.open();
     }
