@@ -12,6 +12,9 @@ use crate::providers::clipboard::{self, ClipboardProvider};
 use crate::providers::websearch::{self, WebSearch};
 use crate::providers::{files, recent, Provider, QueryRequest, Stub};
 use crate::ranking;
+
+/// The one provider that can take seconds: the file index. Everything else answers immediately.
+const FILES_PROVIDER: &str = "files";
 use crate::store::clipboard::ClipboardStore;
 use crate::store::usage::UsageStore;
 
@@ -154,25 +157,10 @@ impl Registry {
         self.query_at(request, now_ms())
     }
 
-    /// [`Registry::query`] with an explicit clock, so ranking is testable.
+    /// Everything the request asks for, ranked (the index included).
     pub fn query_at(&self, request: &QueryRequest, now_ms: i64) -> Vec<ResultItem> {
-        let mut items: Vec<ResultItem> = self
-            .providers
-            .iter()
-            .filter(|provider| {
-                provider.available()
-                    && provider.id() != websearch::PROVIDER
-                    && request.wants(provider.id())
-            })
-            .flat_map(|provider| provider.query(request))
-            .collect();
-        items.extend(
-            request
-                .injected
-                .iter()
-                .filter(|item| request.wants(&item.provider))
-                .cloned(),
-        );
+        let mut items = self.provider_items(request, |id| id != websearch::PROVIDER);
+        items.extend(self.injected_items(request));
 
         // The web-search row is the daemon's last resort (story 30): every other provider has
         // spoken by now, so this is the one place that can tell whether the query already found
@@ -181,6 +169,75 @@ impl Registry {
             items.extend(self.websearch.query(request));
         }
 
+        self.rank(items, request, now_ms)
+    }
+
+    /// The first phase: everything except the file index, ranked, so the search thread can emit it
+    /// the instant the user types (user story 72). When the index cannot answer there is nothing
+    /// slow to wait for, so this is already the complete answer.
+    pub fn query_fast(&self, request: &QueryRequest) -> Vec<ResultItem> {
+        self.query_fast_at(request, now_ms())
+    }
+
+    /// [`Registry::query_fast`] with an explicit clock.
+    pub fn query_fast_at(&self, request: &QueryRequest, now_ms: i64) -> Vec<ResultItem> {
+        let index_answers = request.wants(FILES_PROVIDER) && self.is_capable(FILES_PROVIDER);
+
+        let mut items = self.provider_items(request, |id| {
+            id != FILES_PROVIDER && id != websearch::PROVIDER
+        });
+        items.extend(self.injected_items(request));
+
+        // Only the last-resort row is deferred while the index is still to answer: whether it
+        // belongs depends on everything else, index included.
+        if !index_answers
+            && request.wants(websearch::PROVIDER)
+            && websearch::should_offer(&items, &request.text)
+        {
+            items.extend(self.websearch.query(request));
+        }
+
+        self.rank(items, request, now_ms)
+    }
+
+    /// The second phase: the complete list, ranked. Re-gathers the fast providers, which answer in
+    /// microseconds, so the file index — the only slow one — is asked exactly once.
+    pub fn query_complete(&self, request: &QueryRequest) -> Vec<ResultItem> {
+        self.query_at(request, now_ms())
+    }
+
+    /// The providers `keep` accepts: the daemon-owned result sources.
+    fn provider_items(
+        &self,
+        request: &QueryRequest,
+        keep: impl Fn(&str) -> bool,
+    ) -> Vec<ResultItem> {
+        self.providers
+            .iter()
+            .filter(|provider| {
+                provider.available() && keep(provider.id()) && request.wants(provider.id())
+            })
+            .flat_map(|provider| provider.query(request))
+            .collect()
+    }
+
+    /// The candidates the extension computed itself. Always cheap, so both phases carry them.
+    fn injected_items(&self, request: &QueryRequest) -> Vec<ResultItem> {
+        request
+            .injected
+            .iter()
+            .filter(|item| request.wants(&item.provider))
+            .cloned()
+            .collect()
+    }
+
+    /// Score every candidate — usage first, then the scorer — and order by score.
+    fn rank(
+        &self,
+        mut items: Vec<ResultItem>,
+        request: &QueryRequest,
+        now_ms: i64,
+    ) -> Vec<ResultItem> {
         for item in &mut items {
             // What the user has been choosing weights the score (contract §5), so the counters are
             // read before the scorer runs, never after.

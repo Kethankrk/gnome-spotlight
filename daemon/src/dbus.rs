@@ -488,14 +488,25 @@ fn search_thread(
             continue;
         }
 
-        let results: Rows = registry
-            .query(&job.request)
+        // Phase one (user story 72): emit what answers immediately, before the file index is asked,
+        // so the overlay shows results the moment the user types.
+        let fast: Rows = registry
+            .query_fast(&job.request)
             .into_iter()
             .map(|item| item.row())
             .collect();
+        if zbus::block_on(emitter.results_changed(job.id.clone(), fast)).is_err() {
+            break;
+        }
 
+        // Phase two: the complete ranked list, then the end of this search.
+        let all: Rows = registry
+            .query_complete(&job.request)
+            .into_iter()
+            .map(|item| item.row())
+            .collect();
         let emitted = zbus::block_on(async {
-            emitter.results_changed(job.id.clone(), results).await?;
+            emitter.results_changed(job.id.clone(), all).await?;
             emitter.search_finished(job.id).await
         });
 

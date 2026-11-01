@@ -87,7 +87,14 @@ async fn search(proxy: &Proxy<'_>, text: &str, enabled: &[&str], options: Option
         .await
         .expect("Query must be accepted");
 
-    let signal = changed.next().await.expect("a ResultsChanged signal");
+    // Results arrive in two phases: everything but the index, then the complete list once the
+    // index has answered. The complete list is the second one.
+    let first = changed.next().await.expect("the fast ResultsChanged signal");
+    let (fast_id, _fast): (String, Vec<Row>) =
+        first.body().deserialize().expect("ResultsChanged body");
+    assert_eq!(fast_id, search_id, "the fast rows belong to this search");
+
+    let signal = changed.next().await.expect("the complete ResultsChanged signal");
     let (changed_id, results): (String, Vec<Row>) =
         signal.body().deserialize().expect("ResultsChanged body");
     let signal = finished.next().await.expect("a SearchFinished signal");
