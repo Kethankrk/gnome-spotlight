@@ -24,6 +24,11 @@ export const PROVIDER_IDS = [
 
 export const CAPABILITY_IDS = ['files', 'recent', 'clipboard', 'calculator', 'websearch'];
 
+// The overlay's own appearance (schema key `appearance`, contract §8): `system` follows the
+// desktop's colour scheme, the other two override it. Shared by the preferences window, which
+// offers the choice, and `extension.js`, which applies it to the overlay.
+export const APPEARANCE_MODES = ['system', 'light', 'dark'];
+
 // Section order in the result list, from the spec: Top Hit, then applications, files and folders,
 // recent documents, clipboard history, calculations and units, system actions, setting toggles,
 // and finally the web-search row.

@@ -77,3 +77,62 @@ test('the protocol constants match the shipped schema and metadata', () => {
     assert.equal(metadata.uuid, EXTENSION_UUID);
     assert.equal(metadata['settings-schema'], SCHEMA_ID);
 });
+
+test('the preferences window edits the schema keys through lib/shortcut.js', () => {
+    const prefs = read('prefs.js');
+
+    // Adwaita, as GNOME 50 ships it, and the entry point the shell's preferences process calls.
+    // The toolkit versions are pinned: with both Gtk 3 and Gtk 4 typelibs installed, an unversioned
+    // `gi://Gtk` is ambiguous.
+    assert.match(prefs, /from 'gi:\/\/Adw\?version=1'/);
+    assert.match(prefs, /from 'gi:\/\/Gtk\?version=4\.0'/);
+    assert.match(prefs, /extends ExtensionPreferences/);
+    assert.match(prefs, /fillPreferencesWindow\(/);
+
+    // Every key the ticket names is edited, and written straight through: no Apply button.
+    const schema = read('schemas', `${SCHEMA_ID}.gschema.xml`);
+    for (const key of ['summon-shortcut', 'appearance', 'providers-enabled', 'clipboard-enabled']) {
+        assert.match(prefs, new RegExp(`'${key}'`), `prefs.js does not edit ${key}`);
+        assert.match(schema, new RegExp(`name="${key}"`), `the schema has no ${key}`);
+    }
+
+    // One switch per provider, from the shared list rather than a hand-written copy.
+    assert.match(prefs, /PROVIDER_IDS/);
+
+    // The shortcut decisions come from the Node-tested module, not from ad-hoc string work, and
+    // the taken bindings are the shell's and gnome-settings-daemon's.
+    assert.match(prefs, /from '\.\/lib\/shortcut\.js'/);
+    assert.match(prefs, /flattenBindings\(/);
+    assert.match(prefs, /normalizeAccelerator\(/);
+    assert.match(prefs, /collides\(/);
+    assert.match(prefs, /org\.gnome\.desktop\.wm\.keybindings/);
+    assert.match(prefs, /org\.gnome\.settings-daemon\.plugins\.media-keys/);
+});
+
+test('the extension applies preferences live, without a shell restart', () => {
+    const extension = read('extension.js');
+
+    // The summon shortcut, the appearance, the provider list and clipboard history are all
+    // observed, so a change written by the preferences process reaches the running shell.
+    for (const constant of ['SUMMON_KEYBINDING', 'APPEARANCE_KEY', 'PROVIDERS_KEY', 'CLIPBOARD_KEY']) {
+        assert.match(extension, new RegExp(`changed::\\$\\{${constant}\\}`),
+            `${constant} is not observed`);
+    }
+
+    // Clipboard history is the daemon's switch (§2): the preference is pushed to it.
+    assert.match(extension, /ClipboardSetEnabled/);
+
+    // The appearance choice reaches the overlay.
+    assert.match(extension, /setAppearance\(/);
+    assert.match(read('overlay.js'), /setAppearance\(/);
+});
+
+test('the stylesheet themes the overlay for a light and a dark card', () => {
+    const css = read('stylesheet.css');
+    for (const name of ['lumen-appearance-light', 'lumen-appearance-dark'])
+        assert.match(css, new RegExp(`\\.${name}[\\s,{:]+`), `.${name} has no rule`);
+
+    const overlay = read('overlay.js');
+    for (const name of ['lumen-appearance-light', 'lumen-appearance-dark'])
+        assert.match(overlay, new RegExp(name), `the overlay never asks for ${name}`);
+});

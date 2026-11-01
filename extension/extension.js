@@ -29,6 +29,8 @@ import {createClipboardSampler, shouldCapture, SAMPLE_INTERVAL_SECONDS} from './
 
 const SUMMON_KEYBINDING = 'summon-shortcut';
 const PROVIDERS_KEY = 'providers-enabled';
+const APPEARANCE_KEY = 'appearance';
+const CLIPBOARD_KEY = 'clipboard-enabled';
 const APPLICATION_PROVIDER = 'applications';
 // Providers the shell resolves itself: the daemon ranks them, but only the shell can run them.
 const SHELL_PROVIDERS = new Set([ACTION_PROVIDER, SETTINGS_PROVIDER]);
@@ -74,6 +76,18 @@ export default class LumenExtension extends Extension {
             `changed::${SUMMON_KEYBINDING}`, () => this._bindShortcut());
         this._bindShortcut();
 
+        // The preferences window (ticket 12) writes to this schema from another process, so the
+        // three preferences that change what the running shell does are observed here: the
+        // appearance is applied to the overlay, the provider list re-runs the query on screen, and
+        // the clipboard switch is pushed to the engine and starts or stops sampling.
+        this._appearanceChangedId = this._settings.connect(
+            `changed::${APPEARANCE_KEY}`, () => this._applyAppearance());
+        this._providersChangedId = this._settings.connect(
+            `changed::${PROVIDERS_KEY}`, () => this._refreshQuery());
+        this._clipboardChangedId = this._settings.connect(
+            `changed::${CLIPBOARD_KEY}`, () => this._onClipboardSettingChanged());
+        this._applyAppearance();
+
         this._watcherId = Gio.bus_watch_name(
             Gio.BusType.SESSION,
             BUS_NAME,
@@ -96,6 +110,16 @@ export default class LumenExtension extends Extension {
             this._settings?.disconnect(this._shortcutChangedId);
             this._shortcutChangedId = 0;
         }
+
+        for (const id of [
+            this._appearanceChangedId, this._providersChangedId, this._clipboardChangedId,
+        ]) {
+            if (id)
+                this._settings?.disconnect(id);
+        }
+        this._appearanceChangedId = 0;
+        this._providersChangedId = 0;
+        this._clipboardChangedId = 0;
         this._settings = null;
 
         if (this._keybindingBound) {
@@ -134,6 +158,12 @@ export default class LumenExtension extends Extension {
             Shell.ActionMode.ALL,
             () => this._toggleOverlay());
         this._keybindingBound = true;
+    }
+
+    // The `appearance` preference themes the overlay itself (system / light / dark). The launcher's
+    // dark-mode toggle drives the desktop's colour scheme instead (§7d), which `system` follows.
+    _applyAppearance() {
+        this._overlay?.setAppearance(this._settings?.get_string(APPEARANCE_KEY) ?? 'system');
     }
 
     _toggleOverlay() {
@@ -193,6 +223,10 @@ export default class LumenExtension extends Extension {
             }),
         ];
         this._readVersion();
+
+        // The engine's own history flag (§2) is what it restored from its last run, so the
+        // preference the user sees is pushed over it as soon as the engine is reachable.
+        this._pushClipboardEnabled();
     }
 
     _onEngineVanished() {
@@ -243,9 +277,41 @@ export default class LumenExtension extends Extension {
 
     // Clipboard capture. The spec calls for St.Clipboard's `owner-changed` signal, which GNOME 50's
     // St does not have (no StClipboard signals are registered at all), so the clipboard is sampled
-    // on a timer while — and only while — the engine says history is on.
+    // on a timer while — and only while — history is on.
+    //
+    // Two switches have to agree before anything is read (user story 43): the engine's own
+    // `ClipboardEnabled` (§11), which is what makes a push worth sending, and the user's
+    // `clipboard-enabled` preference, which is what they see. The preference is pushed to the
+    // engine whenever it changes and whenever the engine appears, so an engine that came up with
+    // history enabled from a previous session cannot record a copy the preference no longer wants.
     _clipboardEnabled() {
+        if (this._settings?.get_boolean(CLIPBOARD_KEY) !== true)
+            return false;
+
         return this._proxy?.get_cached_property('ClipboardEnabled')?.deep_unpack() === true;
+    }
+
+    _onClipboardSettingChanged() {
+        this._pushClipboardEnabled();
+        this._syncClipboardCapture();
+    }
+
+    // `ClipboardSetEnabled(enabled)` (§2). The engine answers by changing its `ClipboardEnabled`
+    // property, which comes back over `g-properties-changed` and starts or stops the sampling.
+    _pushClipboardEnabled() {
+        if (this._shutdown || !this._proxy || this._engine.status !== EngineStatus.OK)
+            return;
+
+        const enabled = this._settings?.get_boolean(CLIPBOARD_KEY) === true;
+        const call = new GLib.Variant('(b)', [enabled]);
+        this._proxy.call('ClipboardSetEnabled', call, Gio.DBusCallFlags.NONE, -1, null,
+            (proxy, result) => {
+                try {
+                    proxy.call_finish(result);
+                } catch (error) {
+                    logError(error, 'Lumen: the engine refused the clipboard setting');
+                }
+            });
     }
 
     _syncClipboardCapture() {
@@ -330,9 +396,16 @@ export default class LumenExtension extends Extension {
         return injected;
     }
 
-    // Wi-Fi, Bluetooth, Do Not Disturb, the theme, or a lock/suspend availability policy changed
-    // outside the overlay: search again so the rows show the new state.
+    // Wi-Fi, Bluetooth, Do Not Disturb, the theme, a lock/suspend availability policy, or the list
+    // of enabled providers changed outside the overlay: search again so the rows on screen are the
+    // ones the shell would show now.
     _onSystemStateChanged() {
+        this._refreshQuery();
+    }
+
+    // Re-run the query that is on screen, if there is one. Used by everything a result was built
+    // from and that can change underneath it — the system state and the provider preference.
+    _refreshQuery() {
         if (this._shutdown || !this._overlay?.isOpen)
             return;
 

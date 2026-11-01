@@ -34,6 +34,9 @@ export class LumenOverlay {
         this._rows = [];
         this._selectedRow = null;
         this._model = [];
+        this._appearance = 'system';
+        this._systemSettings = null;
+        this._systemSettingsId = 0;
 
         this._card = new St.BoxLayout({
             style_class: 'lumen-card',
@@ -127,6 +130,18 @@ export class LumenOverlay {
         this._monitorsChangedId = Main.layoutManager.connect(
             'monitors-changed', () => this._syncGeometry());
 
+        // `appearance: system` follows the desktop's colour scheme. The shell mirrors that setting
+        // in St.Settings, so no second GSettings object is needed — and a build that cannot answer
+        // (guarded below) keeps the built-in card.
+        try {
+            this._systemSettings = St.Settings.get();
+            if (this._systemSettings)
+                this._systemSettingsId = this._systemSettings.connect(
+                    'notify::color-scheme', () => this._applyAppearance());
+        } catch (error) {
+            logError(error, 'Lumen: no St.Settings, the overlay appearance follows the theme');
+        }
+
         Main.layoutManager.uiGroup.add_child(this._backdrop);
     }
 
@@ -197,6 +212,16 @@ export class LumenOverlay {
     /** The one line under the entry: engine state, or why an activation failed. */
     setStatus(text) {
         this._status.set_text(text ?? '');
+    }
+
+    /**
+     * The overlay's appearance, from the `appearance` preference (contract §8): `light`, `dark`, or
+     * anything else for "follow the system". Only a style class on the backdrop changes, so it
+     * applies to an open overlay as well as to the next one.
+     */
+    setAppearance(mode) {
+        this._appearance = mode === 'light' || mode === 'dark' ? mode : 'system';
+        this._applyAppearance();
     }
 
     /**
@@ -271,6 +296,12 @@ export class LumenOverlay {
             this._backdrop.disconnect(this._buttonPressId);
             this._buttonPressId = 0;
         }
+
+        if (this._systemSettingsId) {
+            this._systemSettings?.disconnect(this._systemSettingsId);
+            this._systemSettingsId = 0;
+        }
+        this._systemSettings = null;
 
         this._backdrop.get_parent()?.remove_child(this._backdrop);
         this._backdrop.destroy();
@@ -461,6 +492,40 @@ export class LumenOverlay {
     _pointer() {
         const [x, y] = global.get_pointer();
         return {x, y};
+    }
+
+    // Only the card's look changes with the appearance, and it changes by style class: the class
+    // goes on the backdrop so the stylesheet can reach the card and everything in it.
+    _applyAppearance() {
+        if (!this._backdrop)
+            return;
+
+        const dark = this._appearance === 'dark' ? true
+            : this._appearance === 'light' ? false
+                : this._systemDark();
+
+        this._backdrop.remove_style_class_name('lumen-appearance-light');
+        this._backdrop.remove_style_class_name('lumen-appearance-dark');
+
+        if (dark === true)
+            this._backdrop.add_style_class_name('lumen-appearance-dark');
+        else if (dark === false)
+            this._backdrop.add_style_class_name('lumen-appearance-light');
+    }
+
+    // What the desktop asked for, or `null` when it cannot be asked. A desktop that has never been
+    // asked for a light scheme keeps the built-in card, which is what the overlay looked like
+    // before there was a choice; only an explicit `prefer-light` turns the card light.
+    _systemDark() {
+        try {
+            const scheme = this._systemSettings?.color_scheme;
+            if (scheme === undefined || !St.SystemColorScheme)
+                return null;
+
+            return scheme !== St.SystemColorScheme.PREFER_LIGHT;
+        } catch (error) {
+            return null;
+        }
     }
 
     _onCapturedEvent(_actor, event) {
