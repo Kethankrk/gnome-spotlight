@@ -1,0 +1,23 @@
+# XDG-autostart fallback for Lumen's engine (ticket 16).
+#
+# `packaging/install.sh` renders this template into `$XDG_CONFIG_HOME/autostart/lumen.desktop`.
+# `X-GNOME-HiddenUnderSystemd=true` and `X-systemd-skip=true` are the pair GNOME's LocalSearch uses
+# (research §4.1): where systemd is the session manager, `systemd-xdg-autostart-generator` leaves
+# this file alone and `lumen.service` is the one that starts the daemon; a session without systemd
+# (Alpine, Void, a bare `gnome-session`) starts it from here instead. `TryExec` keeps a desktop
+# from starting a daemon that is not installed any more.
+#
+# The autostart spec asks for comments to sit outside the group declarations, so they are all above
+# `[Desktop Entry]`.
+[Desktop Entry]
+Type=Application
+Name=Lumen
+Comment=Spotlight-equivalent search overlay for GNOME
+Exec=@DAEMON@ --indexer localsearch
+TryExec=@DAEMON@
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-HiddenUnderSystemd=true
+X-systemd-skip=true
+OnlyShowIn=GNOME;

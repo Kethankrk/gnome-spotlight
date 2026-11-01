@@ -1,0 +1,26 @@
+# Lumen's search engine, as a per-user service (ticket 16).
+#
+# `Type=notify` + `BusName=` is the shape GNOME's own LocalSearch ships (research §4.1): systemd
+# considers the unit started when the daemon sends `READY=1` (the daemon does, see
+# daemon/src/notify.rs), and the name it claims is `org.gnome.Lumen`, which is also the
+# single-instance lock. `packaging/install.sh` renders this template into
+# `$XDG_CONFIG_HOME/systemd/user/`; sessions without systemd use the D-Bus activation file and the
+# XDG autostart entry instead.
+[Unit]
+Description=Lumen search engine
+Documentation=https://github.com/kethan/lumen
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionUser=!@system
+ConditionEnvironment=XDG_SESSION_CLASS=user
+
+[Service]
+Type=notify
+BusName=org.gnome.Lumen
+ExecStart=@DAEMON@ --indexer localsearch
+Environment=GSETTINGS_SCHEMA_DIR=@SCHEMA_DIR@
+Restart=on-failure
+Slice=background.slice
+
+[Install]
+WantedBy=graphical-session.target

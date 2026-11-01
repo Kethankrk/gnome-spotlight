@@ -401,3 +401,31 @@ fn injected_candidates_are_ranked_and_an_exact_application_is_the_top_hit() {
     );
     assert!(scores[0] > scores[1]);
 }
+
+/// Ticket 16: `cli/lumen --toggle` asks the daemon, which asks the shell, because the overlay
+/// lives inside `gnome-shell` and the daemon cannot render anything.
+#[test]
+fn toggle_emits_toggle_requested_for_the_shell_to_act_on() {
+    let harness = Harness::spawn();
+    let address = harness.address().to_string();
+    let name = harness.name().to_string();
+
+    block(async move {
+        let connection = connect(&address).await.expect("connect to the bus");
+        let proxy = engine_proxy(&connection, &name).await.expect("engine proxy");
+
+        // `receive_signal` only yields messages whose member is `ToggleRequested`, so a differently
+        // named (or missing) signal would never arrive and the harness would time the test out.
+        let mut toggles = proxy
+            .receive_signal("ToggleRequested")
+            .await
+            .expect("ToggleRequested stream");
+
+        proxy
+            .call::<_, _, ()>("Toggle", &())
+            .await
+            .expect("Toggle must be callable");
+
+        toggles.next().await.expect("ToggleRequested signal");
+    });
+}

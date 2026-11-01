@@ -26,6 +26,7 @@ import {
 } from './lib/actions.js';
 import {resultsFromRows, unpack} from './lib/wire.js';
 import {createClipboardSampler, shouldCapture, SAMPLE_INTERVAL_SECONDS} from './lib/clipboard.js';
+import {updateNotification, updateStatus, versionFilePaths} from './lib/update.js';
 
 const SUMMON_KEYBINDING = 'summon-shortcut';
 const PROVIDERS_KEY = 'providers-enabled';
@@ -60,6 +61,9 @@ export default class LumenExtension extends Extension {
             onKey: (keyval, modifiers) => this._onKey(keyval, modifiers),
         });
         this._setEngineState(null, null);
+
+        // Is there a newer release than the one installed? (ticket 16)
+        this._checkForUpdate();
 
         // The system actions and setting toggles come from the shell itself (ticket 09): their live
         // state is gathered here, and `onChanged` re-queries when something changes the state
@@ -220,6 +224,8 @@ export default class LumenExtension extends Extension {
                     this._onResultsChanged(parameters);
                 else if (signalName === 'ClipboardChanged')
                     this._onClipboardChanged();
+                else if (signalName === 'ToggleRequested')
+                    this._toggleOverlay();
             }),
         ];
         this._readVersion();
@@ -273,6 +279,39 @@ export default class LumenExtension extends Extension {
         this._activeSearch = null;
         this._awaitingResults = false;
         this._syncClipboardCapture();
+    }
+
+    // The update path (ticket 16). Lumen is updated by re-running the installer, so there is
+    // nothing to fetch here: the installer writes the version it installed and the newest release
+    // it knows about into the Lumen data directory, and this compares the two. A git checkout (no
+    // data directory), a missing file and an unreadable one are all "no news", never an error —
+    // and nothing here touches the network (contract §9).
+    _checkForUpdate() {
+        const paths = versionFilePaths({
+            xdgDataHome: GLib.get_user_data_dir(),
+            home: GLib.get_home_dir(),
+        });
+        const status = updateStatus(
+            this._readTextFile(paths.installed),
+            this._readTextFile(paths.latest));
+
+        const notification = updateNotification(status);
+        if (notification)
+            Main.notify(notification.title, notification.body);
+        else
+            log(`Lumen ${status.current ?? 'version unknown'} (${status.state})`);
+    }
+
+    _readTextFile(path) {
+        if (!path)
+            return null;
+
+        try {
+            const [ok, bytes] = GLib.file_get_contents(path);
+            return ok ? new TextDecoder().decode(bytes) : null;
+        } catch {
+            return null;
+        }
     }
 
     // Clipboard capture. The spec calls for St.Clipboard's `owner-changed` signal, which GNOME 50's

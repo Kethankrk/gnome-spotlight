@@ -12,7 +12,8 @@ contract is in the notes that accompany the implementation.
 ```
 daemon/      Rust engine daemon; owns org.gnome.Lumen
 extension/   GNOME Shell extension; lib/ holds the pure-JS model modules
-packaging/   Per-user installer, systemd unit, D-Bus activation, autostart
+cli/lumen    Launcher/control CLI for the installed daemon (--toggle, --status, --version)
+packaging/   Per-user installer, session files, release builder — see packaging/README.md
 ```
 
 ## Building and testing
@@ -25,12 +26,27 @@ cargo test                               # daemon unit + D-Bus integration tests
 
 node --test 'extension/test/**/*.test.js'  # extension model tests (no shell)
 
+sh packaging/tests/install_test.sh       # installer/uninstaller, into a throw-away HOME
+
 glib-compile-schemas extension/schemas/  # build the shared GSettings schema
 gnome-extensions pack extension/ -o dist/  # pack the extension zip
 ```
 
-`make test` runs both suites; `make pack` compiles the schema and packs the extension; `make build`
-builds a release daemon.
+`make test` runs all three suites; `make test-packaging` runs the installer test alone;
+`make pack` compiles the schema and packs the extension; `make build` builds a release daemon;
+`make release` builds the x86_64 and aarch64 archives with their checksums.
+
+## Installing
+
+Prebuilt archives are installed per user, with no root, from a checksum-verified download:
+
+```sh
+sh install.sh --archive lumen-0.1.0-x86_64.tar.gz --sha256sums SHA256SUMS
+gnome-extensions enable lumen@kethan.dev
+```
+
+Re-running the installer is the update path, `--uninstall` takes it all back out, and the extension
+tells the user when a newer release exists. `packaging/README.md` has the details.
 
 ## The two seams
 
