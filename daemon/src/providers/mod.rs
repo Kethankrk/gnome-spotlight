@@ -7,6 +7,7 @@
 pub mod calculator;
 pub mod clipboard;
 pub mod files;
+pub mod recent;
 
 use crate::protocol::ResultItem;
 
