@@ -1,5 +1,6 @@
 /* Loaded automatically from the extension directory. Dark translucent card + near-white text
-   keeps contrast high whatever the wallpaper is (appearance handling arrives with ticket 12). */
+   keeps contrast high whatever the wallpaper is; the light variant at the bottom of this file is
+   what the `appearance` preference switches to. */
 
 .lumen-backdrop {
     background-color: rgba(0, 0, 0, 0.25);
@@ -119,3 +120,65 @@
     font-size: 12px;
     font-style: italic;
 }
+
+/* Appearance (contract §8, ticket 12). `extension.js` puts one of these classes on the backdrop
+   when the `appearance` preference says so; `lumen-appearance-dark` is the card the overlay has
+   always had, spelled out, and `lumen-appearance-light` is the same layout on a light surface.
+   The classes are on the backdrop so the rules below reach the card and everything inside it. */
+.lumen-appearance-dark .lumen-card {
+    background-color: rgba(32, 33, 38, 0.92);
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+.lumen-appearance-light .lumen-card {
+    background-color: rgba(250, 250, 252, 0.94);
+    border-color: rgba(0, 0, 0, 0.12);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+}
+
+.lumen-appearance-light .lumen-entry,
+.lumen-appearance-light .lumen-entry:focus {
+    color: #1c1c20;
+    caret-color: #1c1c20;
+}
+
+.lumen-appearance-light .lumen-status {
+    color: rgba(28, 28, 32, 0.7);
+}
+
+.lumen-appearance-light .lumen-section-header {
+    color: rgba(28, 28, 32, 0.55);
+}
+
+.lumen-appearance-light .lumen-row-selected {
+    background-color: rgba(0, 0, 0, 0.10);
+}
+
+.lumen-appearance-light .lumen-row-title {
+    color: #1c1c20;
+}
+
+.lumen-appearance-light .lumen-row-subtitle {
+    color: rgba(28, 28, 32, 0.65);
+}
+
+.lumen-appearance-light .lumen-preview {
+    border-top: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+.lumen-appearance-light .lumen-preview-title {
+    color: #1c1c20;
+}
+
+.lumen-appearance-light .lumen-preview-label {
+    color: rgba(28, 28, 32, 0.55);
+}
+
+.lumen-appearance-light .lumen-preview-value {
+    color: rgba(28, 28, 32, 0.85);
+}
+
+.lumen-appearance-light .lumen-preview-empty {
+    color: rgba(28, 28, 32, 0.5);
+}
+
