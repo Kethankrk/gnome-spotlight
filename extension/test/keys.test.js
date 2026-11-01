@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 
-import {intentFor, KEYS, DEFAULT_PAGE_SIZE} from '../lib/keys.js';
+import {intentFor, hasShift, KEYS, SHIFT_MASK, DEFAULT_PAGE_SIZE} from '../lib/keys.js';
 
 test('the keyvals are the Gdk/Clutter symbol numbers', () => {
     assert.equal(KEYS.Up, 0xff52);
@@ -30,10 +30,26 @@ test('the numeric keypad enter activates too', () => {
     assert.equal(intentFor(KEYS.KpEnter), 'activate');
 });
 
-test('Tab walks the list and Shift+Tab walks back', () => {
-    assert.equal(intentFor(KEYS.Tab), 'next');
-    assert.equal(intentFor(KEYS.IsoLeftTab), 'prev');
-    assert.equal(intentFor(KEYS.Tab, {shift: true}), 'prev');
+test('Tab moves between sections and Shift+Tab moves back', () => {
+    assert.equal(intentFor(KEYS.Tab), 'next-section');
+    assert.equal(intentFor(KEYS.IsoLeftTab), 'prev-section');
+    assert.equal(intentFor(KEYS.Tab, {shift: true}), 'prev-section');
+    // The list-level intents the arrows use are untouched.
+    assert.equal(intentFor(KEYS.Down), 'next');
+    assert.equal(intentFor(KEYS.Up), 'prev');
+});
+
+test('Shift is read from the modifier mask, where Wayland puts it', () => {
+    assert.equal(SHIFT_MASK, 1 << 0);
+    assert.equal(hasShift(SHIFT_MASK), true);
+    assert.equal(hasShift(0), false);
+    assert.equal(hasShift(undefined), false);
+    assert.equal(hasShift(null), false);
+
+    // Shift+Tab on Wayland is the Tab keyval with the mask, which is the same intent as ISO_Left_Tab.
+    const intent = intentFor(KEYS.Tab, {shift: hasShift(SHIFT_MASK)});
+    assert.equal(intent, intentFor(KEYS.IsoLeftTab));
+    assert.equal(intent, 'prev-section');
 });
 
 test('every other key is not a navigation intent', () => {
