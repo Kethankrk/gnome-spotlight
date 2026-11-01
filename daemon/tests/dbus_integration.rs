@@ -5,6 +5,7 @@ mod support;
 use std::collections::HashMap;
 
 use futures_util::StreamExt;
+use zbus::OwnedVariant;
 use support::{block, connect, engine_proxy, name_is_owned, Harness};
 
 /// `a{sv}`, the shape of `Query`'s `options` argument.
@@ -179,4 +180,85 @@ fn second_daemon_loses_the_name_race_and_exits() {
     );
 
     assert!(first.terminate().success());
+}
+
+fn ov_str(value: &str) -> OwnedVariant {
+    OwnedVariant::try_from(zbus::Variant::from(value.to_string())).expect("an owned string")
+}
+
+fn injected(id: &str, provider: &str, title: &str) -> HashMap<String, OwnedVariant> {
+    HashMap::from([
+        ("id".to_string(), ov_str(id)),
+        ("provider".to_string(), ov_str(provider)),
+        ("title".to_string(), ov_str(title)),
+    ])
+}
+
+fn injected_options(rows: Vec<HashMap<String, OwnedVariant>>) -> Options {
+    let array: Vec<OwnedVariant> = rows.into_iter().map(OwnedVariant::from).collect();
+    let variant = zbus::Variant::from(array);
+    let mut options = Options::new();
+    options.insert(
+        "injected".to_string(),
+        OwnedVariant::try_from(variant).expect("an owned a{sv} array"),
+    );
+    options
+}
+
+fn text_of(row: &HashMap<String, OwnedVariant>, key: &str) -> String {
+    String::try_from(row[key].try_clone().expect("cloneable")).expect("a string")
+}
+
+fn number_of(row: &HashMap<String, OwnedVariant>, key: &str) -> f64 {
+    f64::try_from(row[key].try_clone().expect("cloneable")).expect("a number")
+}
+
+#[test]
+fn injected_candidates_are_ranked_and_an_exact_application_is_the_top_hit() {
+    let harness = Harness::spawn();
+    let address = harness.address().to_string();
+    let name = harness.name().to_string();
+
+    let (providers, titles, scores) = block(async move {
+        let connection = connect(&address).await.expect("connect to the bus");
+        let proxy = engine_proxy(&connection, &name).await.expect("engine proxy");
+        let mut changed = proxy
+            .receive_signal("ResultsChanged")
+            .await
+            .expect("ResultsChanged stream");
+
+        let options = injected_options(vec![
+            injected("file:/home/me/Files", "files", "Files"),
+            injected("app:org.gnome.Nautilus.desktop", "applications", "Files"),
+        ]);
+        let _: String = proxy
+            .call(
+                "Query",
+                &("files", vec!["applications", "files"], options),
+            )
+            .await
+            .expect("Query");
+
+        let signal = changed.next().await.expect("ResultsChanged signal");
+        let (_id, results): (String, Vec<HashMap<String, OwnedVariant>>) =
+            signal.body().deserialize().expect("ResultsChanged body");
+
+        let providers: Vec<String> = results.iter().map(|r| text_of(r, "provider")).collect();
+        let titles: Vec<String> = results.iter().map(|r| text_of(r, "title")).collect();
+        let scores: Vec<f64> = results.iter().map(|r| number_of(r, "score")).collect();
+        (providers, titles, scores)
+    });
+
+    assert_eq!(
+        providers,
+        vec!["applications".to_string(), "files".to_string()],
+        "the exact application match must outrank the file"
+    );
+    assert_eq!(titles, vec!["Files".to_string(), "Files".to_string()]);
+    assert!(
+        (scores[0] - 1.30).abs() < 1e-9,
+        "an exact app match scores base 0.30 + quality 1.0, got {}",
+        scores[0]
+    );
+    assert!(scores[0] > scores[1]);
 }

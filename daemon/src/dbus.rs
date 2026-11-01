@@ -13,7 +13,7 @@ use zbus::fdo::{RequestNameFlags, RequestNameReply};
 use zbus::object_server::SignalEmitter;
 use zbus::{interface, Connection, OwnedVariant};
 
-use crate::protocol::{self, Rows};
+use crate::protocol::{self, ResultItem, Rows};
 use crate::providers::QueryRequest;
 use crate::registry::{Indexer, Registry};
 
@@ -84,21 +84,28 @@ impl Engine {
 
     /// Start a search and return its id. Results arrive as signals.
     ///
-    /// `options` may carry `injected` candidate results from the extension; merging them is the
-    /// extension-provider work, so for now the option bag is accepted and ignored.
+    /// `options["injected"]` carries candidate results the extension computed itself; they are
+    /// merged with the daemon's providers and ranked together.
     fn query(
         &self,
         text: String,
         enabled_providers: Vec<String>,
         options: HashMap<String, OwnedVariant>,
     ) -> String {
-        let _ = options;
+        let injected: Vec<ResultItem> = options
+            .get("injected")
+            .map(|v| protocol::injected_rows(v))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(ResultItem::from_row)
+            .collect();
+
         let number = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
         let id = format!("s{number}");
         let job = SearchJob {
             number,
             id: id.clone(),
-            request: QueryRequest::new(text, enabled_providers),
+            request: QueryRequest::new(text, enabled_providers).with_injected(injected),
         };
         let _ = self.jobs.send(job);
         id

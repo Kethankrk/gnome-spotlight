@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use zbus::Variant;
+use zbus::{OwnedVariant, Variant};
 
 /// The well-known name whose ownership is Lumen's single-instance lock.
 pub const BUS_NAME: &str = "org.gnome.Lumen";
@@ -108,6 +108,10 @@ pub struct ResultItem {
     pub score: f64,
     pub actions: Vec<Action>,
     pub preview: Row,
+    /// Ranking metadata. Not on the wire: the daemon's scorer owns the final score.
+    pub timestamp: Option<i64>,
+    /// How often the user has activated this result. Not on the wire.
+    pub usage: u32,
 }
 
 impl ResultItem {
@@ -121,7 +125,46 @@ impl ResultItem {
             score: 0.0,
             actions: Vec::new(),
             preview: Row::new(),
+            timestamp: None,
+            usage: 0,
         }
+    }
+
+    /// Parse a result the extension injected (contract §3).
+    pub fn from_row(row: &Row) -> Option<Self> {
+        let id = string_field(row, "id")?;
+        let provider = string_field(row, "provider")?;
+        let mut item = Self::new(provider, id, string_field(row, "title").unwrap_or_default());
+        item.subtitle = string_field(row, "subtitle").unwrap_or_default();
+        item.icon = string_field(row, "icon").unwrap_or_default();
+        if let Some(score) = row.get("score").and_then(|v| f64::try_from(v).ok()) {
+            item.score = score;
+        }
+        if let Some(actions) = row
+            .get("actions")
+            .and_then(|v| v.try_clone().ok())
+            .and_then(|v| Vec::<HashMap<String, OwnedVariant>>::try_from(v).ok())
+        {
+            item.actions = actions
+                .into_iter()
+                .map(owned_row)
+                .filter_map(|a| {
+                    Some(Action::new(
+                        string_field(&a, "id")?,
+                        string_field(&a, "label")?,
+                        string_field(&a, "handler")?,
+                    ))
+                })
+                .collect();
+        }
+        if let Some(preview) = row
+            .get("preview")
+            .and_then(|v| v.try_clone().ok())
+            .and_then(|v| HashMap::<String, OwnedVariant>::try_from(v).ok())
+        {
+            item.preview = owned_row(preview);
+        }
+        Some(item)
     }
 
     /// The `a{sv}` form that goes on the wire and into the extension's model.
@@ -138,6 +181,27 @@ impl ResultItem {
             ("preview".to_string(), Variant::new(self.preview.clone())),
         ])
     }
+}
+
+/// Read a string field from an `a{sv}` row.
+pub fn string_field(row: &Row, key: &str) -> Option<String> {
+    row.get(key).and_then(|v| String::try_from(v).ok())
+}
+
+/// Convert an owned `a{sv}` map into a [`Row`].
+pub fn owned_row(map: HashMap<String, OwnedVariant>) -> Row {
+    map.into_iter().map(|(k, v)| (k, Variant::from(v))).collect()
+}
+
+/// Turn the `injected` option (an `aa{sv}`) into rows the scorer can rank.
+pub fn injected_rows(option: &Variant<'_>) -> Vec<Row> {
+    let Some(owned) = option.try_clone().ok() else {
+        return Vec::new();
+    };
+    let Ok(rows) = Vec::<HashMap<String, OwnedVariant>>::try_from(owned) else {
+        return Vec::new();
+    };
+    rows.into_iter().map(owned_row).collect()
 }
 
 #[cfg(test)]

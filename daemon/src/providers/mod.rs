@@ -7,13 +7,16 @@
 use crate::protocol::ResultItem;
 
 /// What a provider is asked for.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryRequest {
     /// The raw query text, as typed.
     pub text: String,
     /// Provider ids the caller wants results from; empty means "no restriction beyond the
     /// registry's own availability".
     pub enabled: Vec<String>,
+    /// Candidate results the extension computed itself (applications, system actions, setting
+    /// toggles). The registry ranks these alongside the daemon's own providers.
+    pub injected: Vec<ResultItem>,
 }
 
 impl QueryRequest {
@@ -21,7 +24,13 @@ impl QueryRequest {
         Self {
             text: text.into(),
             enabled,
+            injected: Vec::new(),
         }
+    }
+
+    pub fn with_injected(mut self, injected: Vec<ResultItem>) -> Self {
+        self.injected = injected;
+        self
     }
 
     /// Whether this request wants results from `provider`.

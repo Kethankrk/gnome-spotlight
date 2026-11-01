@@ -2,9 +2,11 @@
 //! turns a [`QueryRequest`] into results.
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::protocol::{ResultItem, CAPABILITY_IDS, PROVIDER_IDS};
 use crate::providers::{Provider, QueryRequest, Stub};
+use crate::ranking;
 
 /// How the daemon reaches LocalSearch/TinySPARQL. The indexer is behind its own seam so that the
 /// daemon can run, and its tests can run, on a machine without an index.
@@ -61,14 +63,49 @@ impl Registry {
             .any(|provider| provider.id() == id && provider.available())
     }
 
-    /// Ask every provider the request wants for results.
+    /// Ask every provider the request wants for results, merge the extension's injected
+    /// candidates, and rank the lot with the single scorer.
     pub fn query(&self, request: &QueryRequest) -> Vec<ResultItem> {
-        self.providers
+        self.query_at(request, now_ms())
+    }
+
+    /// [`Registry::query`] with an explicit clock, so ranking is testable.
+    pub fn query_at(&self, request: &QueryRequest, now_ms: i64) -> Vec<ResultItem> {
+        let mut items: Vec<ResultItem> = self
+            .providers
             .iter()
             .filter(|provider| provider.available() && request.wants(provider.id()))
             .flat_map(|provider| provider.query(request))
-            .collect()
+            .collect();
+        items.extend(
+            request
+                .injected
+                .iter()
+                .filter(|item| request.wants(&item.provider))
+                .cloned(),
+        );
+
+        for item in &mut items {
+            item.score = ranking::score(item, &request.text, now_ms);
+        }
+
+        items.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| ranking::provider_rank(&a.provider).cmp(&ranking::provider_rank(&b.provider)))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+
+        items
     }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn is_available(id: &str, indexer: &Indexer) -> bool {

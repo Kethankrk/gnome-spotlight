@@ -7,6 +7,7 @@
 pub mod dbus;
 pub mod protocol;
 pub mod providers;
+pub mod ranking;
 pub mod registry;
 
 pub use dbus::{serve, Config, Serving};
