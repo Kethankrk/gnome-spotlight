@@ -18,6 +18,7 @@ use crate::providers::clipboard::entry_row;
 use crate::providers::QueryRequest;
 use crate::registry::{Indexer, Registry};
 use crate::store::clipboard::ClipboardStore;
+use crate::store::{self, ClipboardMode};
 
 /// Everything the daemon needs to serve its side of the contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,8 @@ pub struct Config {
     pub object_path: String,
     /// How to reach LocalSearch/TinySPARQL, if at all.
     pub indexer: Indexer,
+    /// Whether clipboard history is written down, and where.
+    pub clipboard: ClipboardMode,
 }
 
 impl Default for Config {
@@ -36,6 +39,7 @@ impl Default for Config {
             dbus_name: protocol::BUS_NAME.to_string(),
             object_path: protocol::OBJECT_PATH.to_string(),
             indexer: Indexer::default(),
+            clipboard: ClipboardMode::default(),
         }
     }
 }
@@ -134,10 +138,10 @@ impl Engine {
         search_id: String,
     ) -> zbus::Result<()>;
 
-    // ---- Clipboard history (ticket 10; memory-only, persistence is ticket 11). ----
+    // ---- Clipboard history (ticket 10, persistent and encrypted since ticket 11). ----
 
-    /// Record one copied text. `false` while history is off or for empty text, so a caller can tell
-    /// "not recorded" from "recorded" without an error.
+    /// Record one copied text. `false` while history is off, for empty text, and for text that
+    /// looks like a secret, so a caller can tell "not recorded" from "recorded" without an error.
     async fn clipboard_push(
         &self,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
@@ -204,7 +208,9 @@ fn timestamp_of(timestamp_ms: u64) -> i64 {
 
 /// Own `config.dbus_name`, export the engine and start the search thread.
 pub async fn serve(config: Config) -> zbus::Result<Serving> {
-    let clipboard = Arc::new(ClipboardStore::new());
+    // The history is opened before the name is owned, so a keyring that needs the user (or not
+    // having one at all) is settled before the first client can ask.
+    let clipboard = store::open_clipboard(config.clipboard);
     let registry = Arc::new(Registry::new(&config.indexer, Arc::clone(&clipboard)));
     let issued = Arc::new(AtomicU64::new(0));
     let (jobs_tx, jobs_rx) = mpsc::channel();
@@ -288,5 +294,10 @@ mod tests {
         assert_eq!(config.dbus_name, "org.gnome.Lumen");
         assert_eq!(config.object_path, "/org/gnome/Lumen");
         assert_eq!(config.indexer, Indexer::None);
+        assert_eq!(
+            config.clipboard,
+            ClipboardMode::Persistent,
+            "the daemon persists the history unless it is told not to"
+        );
     }
 }

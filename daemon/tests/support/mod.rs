@@ -92,6 +92,15 @@ impl Harness {
         if unique_name {
             command.arg("--dbus-name").arg(&name);
         }
+        // Hermetic by default: unless a test asks for the persistent store, the daemon keeps the
+        // history in memory. Otherwise a run on a developer's own session bus would write to their
+        // data directory and their keyring (ticket 11 makes persistence the default).
+        if !extra
+            .iter()
+            .any(|arg| *arg == "--clipboard" || arg.starts_with("--clipboard="))
+        {
+            command.args(["--clipboard", "memory"]);
+        }
         command.args(extra);
 
         let mut daemon = command.spawn().expect("spawn lumen-daemon");
