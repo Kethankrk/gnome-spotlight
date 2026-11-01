@@ -129,6 +129,15 @@ test('the extension applies preferences live, without a shell restart', () => {
     assert.match(read('overlay.js'), /setAppearance\(/);
 });
 
+test('the summon shortcut is a GNOME custom shortcut, not a display keybinding', () => {
+    const extension = read('extension.js');
+    // `Main.wm.addKeybinding` is not delivered by this shell build, so the shortcut is a custom
+    // shortcut that runs the CLI (the documented fallback).
+    assert.doesNotMatch(extension, /addKeybinding/);
+    assert.match(extension, /custom-keybindings/);
+    assert.match(extension, /--toggle/);
+});
+
 test('the activation path picks the action by modifier and runs the shell actions it is handed', () => {
     const extension = read('extension.js');
 

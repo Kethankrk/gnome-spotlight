@@ -114,10 +114,10 @@ Change the shortcut in the preferences window:
 gnome-extensions prefs lumen@kethan.dev
 ```
 
-> **Shortcut:** the default is **`Ctrl+Alt+Space`**. Avoid `Super+Space` and `Ctrl+Space` — those
-> are the desktop's *Switch input source* and the input method's trigger, so the input method keeps
-> the key and the launcher never sees it. `<Shift>Space` is likewise a common IME switch key. Change
-> it in the preferences window if you want something else.
+> **Shortcut:** the default is **`Ctrl+Alt+Space`**, registered as a GNOME *custom shortcut* that
+> runs `lumen --toggle` (Settings → Keyboard → Custom Shortcuts; the preferences window keeps it in
+> sync). Avoid `Super+Space` and `Ctrl+Space` — those are the desktop's *Switch input source* and
+> the input method's trigger.
 
 ## Update and uninstall
 
