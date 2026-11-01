@@ -136,9 +136,13 @@ impl FileQuery {
     }
 
     fn content_branch(&self) -> String {
+        // `fts:match` on the *resource* uses the endpoint's full-text index: it covers the file
+        // name and any indexed text content, and answers in milliseconds. The obvious-looking form
+        // — `?file nie:plainTextContent ?content . ?content fts:match "…"` — is catastrophic:
+        // it matches nothing where the indexer has not extracted text, and the planner scans the
+        // whole index for it, which took ~3s per keystroke (measured) and starved every search.
         format!(
-            "{{ ?file a nfo:FileDataObject ; nfo:fileName ?name ; nie:plainTextContent ?content . \
-             ?content fts:match \"{}\" }}",
+            "{{ ?file fts:match \"{}\" ; nfo:fileName ?name }}",
             escape_literal(&self.needle)
         )
     }
@@ -272,6 +276,14 @@ mod tests {
             !query.name_only_sparql().contains("fts:match"),
             "{}",
             query.name_only_sparql()
+        );
+
+        // The fast form: `fts:match` on the resource. The `nie:plainTextContent` form scanned the
+        // whole index (seconds per query) and returned nothing where no text was extracted.
+        assert!(
+            !query.sparql().contains("nie:plainTextContent"),
+            "the content branch must use the full-text index, not a content-property scan: {}",
+            query.sparql()
         );
     }
 
