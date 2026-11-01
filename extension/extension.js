@@ -229,8 +229,11 @@ export default class LumenExtension extends Extension {
             SUMMON_KEYBINDING,
             this._settings,
             Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
-            Shell.ActionMode.ALL,
-            () => this._toggleOverlay());
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => {
+                log('Lumen: summon shortcut pressed');
+                this._toggleOverlay();
+            });
         this._keybindingBound = action !== Meta.KeyBindingAction.NONE;
 
         if (this._keybindingBound) {

@@ -457,13 +457,15 @@ export class LumenOverlay {
             text: label,
             y_align: Clutter.ActorAlign.START,
         }));
-        row.add_child(new St.Label({
+        const valueLabel = new St.Label({
             style_class: 'lumen-preview-value',
             text: value,
-            line_wrap: true,
             x_expand: true,
             x_align: Clutter.ActorAlign.START,
-        }));
+        });
+        // St.Label has no `line_wrap` in GNOME 50; the shell sets it on the inner ClutterText.
+        valueLabel.clutter_text.line_wrap = true;
+        row.add_child(valueLabel);
 
         return row;
     }

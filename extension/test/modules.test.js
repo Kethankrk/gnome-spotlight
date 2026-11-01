@@ -186,6 +186,10 @@ test('the shell glue sets no removed St properties (`spacing` is CSS-only)', () 
     assert.doesNotMatch(read('overlay.js'), /\bvertical\s*:/,
         'use orientation: Clutter.Orientation.* — `vertical` was removed in GNOME 51');
 
+    // St.Label has no `line_wrap` property in GNOME 50; set it on the inner ClutterText.
+    assert.doesNotMatch(read('overlay.js'), /\bline_wrap\s*:/,
+        'set line_wrap on label.clutter_text, not as a constructor property');
+
     // `Main.pushModal` defaults to ActionMode.NONE, which filters out every global keybinding —
     // including the summon shortcut, so it could not toggle the overlay closed.
     assert.match(read('overlay.js'), /pushModal\([^)]*actionMode:/s,
