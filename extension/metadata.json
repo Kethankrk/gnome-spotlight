@@ -1,0 +1,9 @@
+{
+  "uuid": "lumen@kethan.dev",
+  "name": "Lumen",
+  "description": "Spotlight-equivalent search overlay for GNOME: applications, files, calculations, actions and clipboard history in one ranked list.",
+  "shell-version": ["50", "51"],
+  "settings-schema": "org.gnome.shell.extensions.lumen",
+  "gettext-domain": "lumen",
+  "url": "https://github.com/kethan/lumen"
+}

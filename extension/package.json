@@ -1,0 +1,9 @@
+{
+  "name": "lumen-extension",
+  "private": true,
+  "type": "module",
+  "description": "Lumen GNOME Shell extension (pure-JS model modules are tested with node:test)",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\""
+  }
+}
