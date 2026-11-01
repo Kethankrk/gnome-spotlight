@@ -1,7 +1,15 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 
-import {buildRequest, hasSecondWindowModifier, SECOND_WINDOW_MODIFIER} from '../lib/query.js';
+import {
+    COPY_MODIFIER,
+    REVEAL_MODIFIER,
+    buildRequest,
+    hasCopyModifier,
+    hasRevealModifier,
+    hasSecondWindowModifier,
+    SECOND_WINDOW_MODIFIER,
+} from '../lib/query.js';
 import {PROVIDER_IDS} from '../lib/protocol.js';
 
 test('the query text is trimmed', () => {
@@ -40,4 +48,19 @@ test('the second-window modifier is the control bit of a Clutter mask', () => {
     assert.equal(hasSecondWindowModifier(0), false);
     assert.equal(hasSecondWindowModifier(null), false);
     assert.equal(hasSecondWindowModifier(undefined), false);
+});
+
+test('the reveal and copy modifiers are the bits a file row reads', () => {
+    // Control asks for the secondary action (a second window for an application, `Show in Files`
+    // for a file); Alt asks for the copy. Both are Clutter masks, spelled as numbers.
+    assert.equal(REVEAL_MODIFIER, 1 << 2);
+    assert.equal(COPY_MODIFIER, 1 << 3);
+    assert.equal(hasRevealModifier(REVEAL_MODIFIER), true);
+    assert.equal(hasRevealModifier(COPY_MODIFIER), false);
+    assert.equal(hasCopyModifier(COPY_MODIFIER), true);
+    assert.equal(hasCopyModifier(COPY_MODIFIER | 1 << 6), true, 'Alt+Super still counts');
+    assert.equal(hasCopyModifier(REVEAL_MODIFIER), false);
+    assert.equal(hasCopyModifier(0), false);
+    assert.equal(hasCopyModifier(null), false);
+    assert.equal(hasCopyModifier(undefined), false);
 });

@@ -127,6 +127,30 @@ test('the extension applies preferences live, without a shell restart', () => {
     assert.match(read('overlay.js'), /setAppearance\(/);
 });
 
+test('the activation path picks the action by modifier and runs the shell actions it is handed', () => {
+    const extension = read('extension.js');
+
+    // Which action a press runs is lib/activation.js's decision, not an ad-hoc `?? 'open'`.
+    assert.match(extension, /from '\.\/lib\/activation\.js'/);
+    assert.match(extension, /activationAction\(/);
+    assert.match(read('lib', 'query.js'), /REVEAL_MODIFIER/);
+    assert.match(read('lib', 'query.js'), /COPY_MODIFIER/);
+
+    // The two shell actions of contract §2: `copy` writes the Wayland clipboard, `reveal` shows
+    // the file in the desktop's file manager.
+    assert.match(extension, /case 'copy':/);
+    assert.match(extension, /case 'reveal':/);
+    assert.match(extension, /St\.ClipboardType\.CLIPBOARD/);
+    assert.match(extension, /org\.freedesktop\.FileManager1/);
+    assert.match(extension, /ShowItems/);
+
+    // Clipboard history is forgotten from the list itself (story 48): one entry with Delete, the
+    // whole history with Control+Delete, both through the daemon's own methods.
+    assert.match(extension, /ClipboardDelete/);
+    assert.match(extension, /ClipboardClear/);
+    assert.match(read('lib', 'keys.js'), /Delete: 0xffff/);
+});
+
 test('the stylesheet themes the overlay for a light and a dark card', () => {
     const css = read('stylesheet.css');
     for (const name of ['lumen-appearance-light', 'lumen-appearance-dark'])

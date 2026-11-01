@@ -14,6 +14,7 @@ test('the keyvals are the Gdk/Clutter symbol numbers', () => {
     assert.equal(KEYS.KpEnter, 0xff8d);
     assert.equal(KEYS.Tab, 0xff09);
     assert.equal(KEYS.IsoLeftTab, 0xfe20);
+    assert.equal(KEYS.Delete, 0xffff);
 });
 
 test('navigation keys map to intents by number', () => {
@@ -50,6 +51,12 @@ test('Shift is read from the modifier mask, where Wayland puts it', () => {
     const intent = intentFor(KEYS.Tab, {shift: hasShift(SHIFT_MASK)});
     assert.equal(intent, intentFor(KEYS.IsoLeftTab));
     assert.equal(intent, 'prev-section');
+});
+
+test('Delete is the key that forgets a row', () => {
+    assert.equal(intentFor(KEYS.Delete), 'delete');
+    assert.equal(intentFor(KEYS.Delete, {shift: false}), 'delete');
+    assert.equal(intentFor(0xffff), 'delete', 'matched by number, not by name');
 });
 
 test('every other key is not a navigation intent', () => {
