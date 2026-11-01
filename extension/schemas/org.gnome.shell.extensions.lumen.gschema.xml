@@ -2,8 +2,8 @@
 <schemalist>
   <schema id="org.gnome.shell.extensions.lumen" path="/org/gnome/shell/extensions/lumen/">
     <key name="summon-shortcut" type="s">
-      <default>'&lt;Super&gt;space'</default>
-      <summary>Shortcut that summons Lumen</summary>
+      <default>'&lt;Control&gt;&lt;Alt&gt;space'</default>
+      <summary>Shortcut that summons Lumen (avoid Super/Ctrl+Space: the input method owns those)</summary>
     </key>
     <key name="appearance" type="s">
       <default>'system'</default>

@@ -182,6 +182,10 @@ test('the shell glue sets no removed St properties (`spacing` is CSS-only)', () 
     assert.doesNotMatch(read('overlay.js'), /\.get_vscroll_bar\(/,
         'use scrollView.vadjustment: the scroll-bar getter was removed');
 
+    // `vertical` was deprecated in GNOME 48 and removed in GNOME 51; `orientation` replaces it.
+    assert.doesNotMatch(read('overlay.js'), /\bvertical\s*:/,
+        'use orientation: Clutter.Orientation.* — `vertical` was removed in GNOME 51');
+
     // `Main.pushModal` defaults to ActionMode.NONE, which filters out every global keybinding —
     // including the summon shortcut, so it could not toggle the overlay closed.
     assert.match(read('overlay.js'), /pushModal\([^)]*actionMode:/s,

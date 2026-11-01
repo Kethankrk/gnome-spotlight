@@ -114,8 +114,10 @@ Change the shortcut in the preferences window:
 gnome-extensions prefs lumen@kethan.dev
 ```
 
-> **Heads-up:** the default `Super+Space` is the same combination stock GNOME uses for *Switch input
-> source*. The preferences window will flag the clash — pick another shortcut there if you want.
+> **Shortcut:** the default is **`Ctrl+Alt+Space`**. Avoid `Super+Space` and `Ctrl+Space` — those
+> are the desktop's *Switch input source* and the input method's trigger, so the input method keeps
+> the key and the launcher never sees it. `<Shift>Space` is likewise a common IME switch key. Change
+> it in the preferences window if you want something else.
 
 ## Update and uninstall
 

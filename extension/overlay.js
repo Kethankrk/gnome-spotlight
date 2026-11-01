@@ -63,7 +63,7 @@ export class LumenOverlay {
         // GNOME 48); `.lumen-card` in the stylesheet carries it.
         this._card = new St.BoxLayout({
             style_class: 'lumen-card',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             reactive: true,
         });
         // A modal search surface for a screen reader: the card is the thing that appeared, and
@@ -90,7 +90,7 @@ export class LumenOverlay {
 
         this._results = new St.BoxLayout({
             style_class: 'lumen-results',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
         this._results.set_accessible_role(Atk.Role.LIST);
@@ -112,7 +112,7 @@ export class LumenOverlay {
         // while nothing is selected and shows a muted line when the row has nothing to show.
         this._preview = new St.BoxLayout({
             style_class: 'lumen-preview',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
             visible: false,
         });
@@ -129,7 +129,7 @@ export class LumenOverlay {
 
         this._previewRows = new St.BoxLayout({
             style_class: 'lumen-preview-rows',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
 
@@ -327,7 +327,7 @@ export class LumenOverlay {
         if (topHit) {
             const group = new St.BoxLayout({
                 style_class: 'lumen-tophit',
-                vertical: true,
+                orientation: Clutter.Orientation.VERTICAL,
                 x_expand: true,
             });
             group.add_child(this._createRow(topHit, 0));
@@ -448,7 +448,7 @@ export class LumenOverlay {
     _createPreviewRow(label, value) {
         const row = new St.BoxLayout({
             style_class: 'lumen-preview-row',
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             x_expand: true,
         });
 
@@ -486,7 +486,7 @@ export class LumenOverlay {
     _createRow(result, index) {
         const row = new St.BoxLayout({
             style_class: 'lumen-row',
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             x_expand: true,
             reactive: true,
             track_hover: true,
@@ -506,7 +506,7 @@ export class LumenOverlay {
 
         const text = new St.BoxLayout({
             style_class: 'lumen-row-text',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
