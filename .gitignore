@@ -1,0 +1,6 @@
+/target/
+target/
+dist/
+node_modules/
+extension/schemas/gschemas.compiled
+*.zip

@@ -1,0 +1,272 @@
+/* Loaded automatically from the extension directory. Dark translucent card + near-white text
+   keeps contrast high whatever the wallpaper is; the light variant at the bottom of this file is
+   what the `appearance` preference switches to. */
+
+.lumen-backdrop {
+    background-color: rgba(0, 0, 0, 0.25);
+}
+
+.lumen-card {
+    background-color: rgba(32, 33, 38, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 18px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+    padding: 14px 18px 10px 18px;
+}
+
+.lumen-entry {
+    color: #ffffff;
+    caret-color: #ffffff;
+    font-size: 20px;
+    padding: 6px 0;
+}
+
+.lumen-entry:focus {
+    color: #ffffff;
+    caret-color: #ffffff;
+}
+
+.lumen-status {
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 12px;
+    padding: 2px 0 4px 0;
+    text-align: center;
+}
+
+.lumen-scroll {
+    max-height: 360px;
+    margin-top: 2px;
+}
+
+.lumen-results {
+    spacing: 2px;
+}
+
+.lumen-tophit {
+    spacing: 2px;
+    margin-bottom: 4px;
+}
+
+.lumen-section-header {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 11px;
+    font-weight: bold;
+    padding: 6px 8px 2px 8px;
+}
+
+.lumen-row {
+    border-radius: 10px;
+    padding: 6px 8px;
+}
+
+.lumen-row-selected {
+    background-color: rgba(255, 255, 255, 0.18);
+}
+
+.lumen-row-icon {
+    icon-size: 24px;
+}
+
+.lumen-row-text {
+    spacing: 1px;
+}
+
+.lumen-row-title {
+    color: #ffffff;
+    font-size: 14px;
+}
+
+.lumen-row-subtitle {
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 11px;
+}
+
+/* The preview pane sits under the result list and follows the selection. */
+.lumen-preview {
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    margin-top: 8px;
+    padding: 8px 8px 4px 8px;
+    spacing: 6px;
+}
+
+.lumen-preview-title {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: bold;
+}
+
+.lumen-preview-rows {
+    spacing: 4px;
+}
+
+.lumen-preview-row {
+    spacing: 10px;
+}
+
+.lumen-preview-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 11px;
+    min-width: 84px;
+    padding-top: 2px;
+}
+
+.lumen-preview-value {
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 12px;
+}
+
+.lumen-preview-empty {
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 12px;
+    font-style: italic;
+}
+
+/* Appearance (contract §8, ticket 12). `extension.js` puts one of these classes on the backdrop
+   when the `appearance` preference says so; `lumen-appearance-dark` is the card the overlay has
+   always had, spelled out, and `lumen-appearance-light` is the same layout on a light surface.
+   The classes are on the backdrop so the rules below reach the card and everything inside it. */
+.lumen-appearance-dark .lumen-card {
+    background-color: rgba(32, 33, 38, 0.92);
+    border-color: rgba(255, 255, 255, 0.14);
+}
+
+.lumen-appearance-light .lumen-card {
+    background-color: rgba(250, 250, 252, 0.94);
+    border-color: rgba(0, 0, 0, 0.12);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+}
+
+.lumen-appearance-light .lumen-entry,
+.lumen-appearance-light .lumen-entry:focus {
+    color: #1c1c20;
+    caret-color: #1c1c20;
+}
+
+.lumen-appearance-light .lumen-status {
+    color: rgba(28, 28, 32, 0.7);
+}
+
+.lumen-appearance-light .lumen-section-header {
+    color: rgba(28, 28, 32, 0.55);
+}
+
+.lumen-appearance-light .lumen-row-selected {
+    background-color: rgba(0, 0, 0, 0.10);
+}
+
+.lumen-appearance-light .lumen-row-title {
+    color: #1c1c20;
+}
+
+.lumen-appearance-light .lumen-row-subtitle {
+    color: rgba(28, 28, 32, 0.65);
+}
+
+.lumen-appearance-light .lumen-preview {
+    border-top: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+.lumen-appearance-light .lumen-preview-title {
+    color: #1c1c20;
+}
+
+.lumen-appearance-light .lumen-preview-label {
+    color: rgba(28, 28, 32, 0.55);
+}
+
+.lumen-appearance-light .lumen-preview-value {
+    color: rgba(28, 28, 32, 0.85);
+}
+
+.lumen-appearance-light .lumen-preview-empty {
+    color: rgba(28, 28, 32, 0.5);
+}
+
+/* High contrast (ticket 14). `overlay.js` puts `lumen-high-contrast` on the backdrop when
+   `org.gnome.desktop.a11y.interface high-contrast` is on, right next to the appearance class, so
+   these rules can raise the contrast of whichever card the appearance chose: an opaque surface, a
+   visible border, and a selection that inverts instead of tinting. Text that was muted by opacity
+   goes to full-strength so nothing is left below the contrast the theme asks for. */
+.lumen-high-contrast .lumen-card {
+    background-color: rgba(0, 0, 0, 0.98);
+    border: 2px solid #ffffff;
+    box-shadow: none;
+}
+
+.lumen-high-contrast .lumen-entry,
+.lumen-high-contrast .lumen-entry:focus,
+.lumen-high-contrast .lumen-status,
+.lumen-high-contrast .lumen-section-header,
+.lumen-high-contrast .lumen-row-title,
+.lumen-high-contrast .lumen-row-subtitle,
+.lumen-high-contrast .lumen-preview-title,
+.lumen-high-contrast .lumen-preview-label,
+.lumen-high-contrast .lumen-preview-value,
+.lumen-high-contrast .lumen-preview-empty {
+    color: #ffffff;
+}
+
+.lumen-high-contrast .lumen-entry {
+    caret-color: #ffffff;
+}
+
+.lumen-high-contrast .lumen-preview-empty {
+    font-style: normal;
+}
+
+.lumen-high-contrast .lumen-section-header {
+    border-bottom: 1px solid #ffffff;
+}
+
+.lumen-high-contrast .lumen-row-selected {
+    background-color: #ffffff;
+}
+
+.lumen-high-contrast .lumen-row-selected .lumen-row-title,
+.lumen-high-contrast .lumen-row-selected .lumen-row-subtitle {
+    color: #000000;
+}
+
+.lumen-high-contrast .lumen-preview {
+    border-top: 2px solid #ffffff;
+}
+
+/* A light card under high contrast is the highest-contrast pairing the theme has: white surface,
+   black text, black border. Both classes sit on the backdrop, so this wins over the general
+   high-contrast rules above. */
+.lumen-appearance-light.lumen-high-contrast .lumen-card {
+    background-color: rgba(255, 255, 255, 0.98);
+    border: 2px solid #000000;
+}
+
+.lumen-appearance-light.lumen-high-contrast .lumen-entry,
+.lumen-appearance-light.lumen-high-contrast .lumen-entry:focus,
+.lumen-appearance-light.lumen-high-contrast .lumen-status,
+.lumen-appearance-light.lumen-high-contrast .lumen-section-header,
+.lumen-appearance-light.lumen-high-contrast .lumen-row-title,
+.lumen-appearance-light.lumen-high-contrast .lumen-row-subtitle,
+.lumen-appearance-light.lumen-high-contrast .lumen-preview-title,
+.lumen-appearance-light.lumen-high-contrast .lumen-preview-label,
+.lumen-appearance-light.lumen-high-contrast .lumen-preview-value,
+.lumen-appearance-light.lumen-high-contrast .lumen-preview-empty {
+    color: #000000;
+}
+
+.lumen-appearance-light.lumen-high-contrast .lumen-entry {
+    caret-color: #000000;
+}
+
+.lumen-appearance-light.lumen-high-contrast .lumen-section-header,
+.lumen-appearance-light.lumen-high-contrast .lumen-preview {
+    border-color: #000000;
+}
+
+.lumen-appearance-light.lumen-high-contrast .lumen-row-selected {
+    background-color: #000000;
+}
+
+.lumen-appearance-light.lumen-high-contrast .lumen-row-selected .lumen-row-title,
+.lumen-appearance-light.lumen-high-contrast .lumen-row-selected .lumen-row-subtitle {
+    color: #ffffff;
+}
+

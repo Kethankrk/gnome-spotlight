@@ -1,0 +1,12 @@
+# D-Bus activation for Lumen's engine (ticket 16).
+#
+# `packaging/install.sh` renders this template into
+# `$XDG_DATA_HOME/dbus-1/services/org.gnome.Lumen.service`, one of dbus-daemon's standard
+# per-session service directories. It works with no systemd at all — then dbus-daemon runs `Exec=`
+# itself — and with systemd, which the `SystemdService=` key hands over to (the documented way to
+# combine the two, research §4.2). Activating on demand is what makes `lumen --toggle` and the
+# shell's proxy work before the unit has been started.
+[D-BUS Service]
+Name=org.gnome.Lumen
+Exec=@DAEMON@ --indexer localsearch
+SystemdService=lumen.service

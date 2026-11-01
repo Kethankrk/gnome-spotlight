@@ -1,0 +1,141 @@
+#!/bin/sh
+# Lumen's launcher/control CLI (ticket 16).
+#
+# `packaging/install.sh` installs this script as `$XDG_BIN_HOME/lumen` (default
+# `~/.local/bin/lumen`); it is also runnable straight out of a checkout. It talks to the engine
+# daemon over the session bus, so it needs nothing but `gdbus` and nothing but the user's own
+# session: no root, no system state.
+#
+#   lumen --toggle    ask the daemon to summon/dismiss the overlay (the daemon emits
+#                     `ToggleRequested`, the shell extension toggles the overlay). Bind this to a
+#                     shortcut, a mouse button, a launcher entry — anywhere you want a second way in.
+#   lumen --status    is the engine running, and what can it do?
+#   lumen --version   which Lumen is installed (the version the installer recorded)
+#
+# POSIX sh, `set -eu`, no bashisms: it runs on the busybox shells a minimal GNOME session may have.
+
+set -eu
+
+BUS_NAME='org.gnome.Lumen'
+OBJECT_PATH='/org/gnome/Lumen'
+INTERFACE='org.gnome.Lumen.Engine'
+
+usage() {
+    cat <<'EOF'
+Usage: lumen [OPTION]
+
+  (no option), --toggle   summon or dismiss the Lumen overlay
+  --status                report whether the Lumen engine is running, and what it can do
+                          (exits 1 when it is not running, so a script can tell)
+  --version               print the version of the Lumen installed for this user
+  -h, --help              print this help
+
+The engine is started on demand over D-Bus, so --toggle also brings Lumen up when the
+systemd user unit is not running. Environment: XDG_DATA_HOME and HOME (where the version
+the installer recorded lives).
+EOF
+}
+
+die() {
+    printf 'lumen: %s\n' "$*" >&2
+    exit 1
+}
+
+# `$XDG_DATA_HOME` when it is set and absolute, else `$HOME/.local/share` — the same rule the
+# daemon's stores and the extension's update check use (contract §12, §13).
+data_dir() {
+    case "${XDG_DATA_HOME:-}" in
+        /*) printf '%s/lumen\n' "$XDG_DATA_HOME"; return 0 ;;
+    esac
+
+    if [ -n "${HOME:-}" ]; then
+        printf '%s/.local/share/lumen\n' "$HOME"
+    fi
+}
+
+# The version `packaging/install.sh` recorded, so the CLI reports what is installed rather than
+# what it was built from. A checkout, or a hand-copied script, has no such file.
+installed_version() {
+    dir=$(data_dir)
+    if [ -n "$dir" ] && [ -r "$dir/installed-version" ]; then
+        version=$(awk 'NF { print $1; exit }' "$dir/installed-version")
+        if [ -n "$version" ]; then
+            printf '%s\n' "$version"
+            return 0
+        fi
+    fi
+
+    printf '%s\n' "${LUMEN_VERSION:-unknown}"
+}
+
+have_gdbus() {
+    command -v gdbus >/dev/null 2>&1 || die 'gdbus is not installed (it ships with GLib)'
+}
+
+# Call a method on the engine and hand back the raw reply, e.g. `(<uint32 1>,)`.
+engine_call() {
+    gdbus call --session --dest "$BUS_NAME" --object-path "$OBJECT_PATH" --method "$1"
+}
+
+engine_running() {
+    owner=$(gdbus call --session --dest org.freedesktop.DBus \
+        --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.NameHasOwner "$BUS_NAME" 2>/dev/null) || return 1
+    [ "$owner" = '(true,)' ]
+}
+
+# `(<uint32 1>,)` -> `1`;  `(<['recent', 'clipboard']>,)` -> `recent clipboard`.
+unwrap() {
+    sed -e 's/^(<//' -e 's/>,)$//' -e 's/^[[:alnum:]_]* //' \
+        -e 's/[][]//g' -e "s/'//g" -e 's/, */ /g'
+}
+
+do_toggle() {
+    # A plain call to the well-known name: if nothing owns it, the bus starts the service from
+    # the installed D-Bus activation file. The reply is the empty tuple and is not printed.
+    engine_call "$INTERFACE.Toggle" >/dev/null ||
+        die 'could not reach the Lumen engine — is Lumen installed and its service file present?'
+    printf 'toggled the Lumen overlay\n'
+}
+
+do_status() {
+    if engine_running; then
+        version=$(gdbus call --session --dest "$BUS_NAME" --object-path "$OBJECT_PATH" \
+            --method org.freedesktop.DBus.Properties.Get "$INTERFACE" Version | unwrap)
+        capabilities=$(gdbus call --session --dest "$BUS_NAME" --object-path "$OBJECT_PATH" \
+            --method org.freedesktop.DBus.Properties.Get "$INTERFACE" Capabilities | unwrap)
+        printf 'engine: running (protocol %s)\n' "$version"
+        printf 'providers: %s\n' "${capabilities:-none}"
+        printf 'installed: %s\n' "$(installed_version)"
+        return 0
+    fi
+
+    printf 'engine: not running\n'
+    printf 'installed: %s\n' "$(installed_version)"
+    return 1
+}
+
+case "${1:-}" in
+    ''|--toggle)
+        [ $# -le 1 ] || { usage >&2; exit 2; }
+        have_gdbus
+        do_toggle
+        ;;
+    --status)
+        [ $# -le 1 ] || { usage >&2; exit 2; }
+        have_gdbus
+        do_status
+        ;;
+    --version)
+        [ $# -le 1 ] || { usage >&2; exit 2; }
+        printf 'lumen %s\n' "$(installed_version)"
+        ;;
+    -h|--help)
+        usage
+        ;;
+    *)
+        printf 'lumen: unknown option `%s`\n\n' "$1" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

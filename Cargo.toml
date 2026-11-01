@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["daemon"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/kethan/lumen"
+
+[workspace.dependencies]
+zbus = "6"
+libc = "0.2"
+serde_json = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Authenticated encryption for the clipboard history at rest (RFC 8439). `alloc` gives the
+# `Vec`-returning `Aead` API; `getrandom`/`OsRng` is deliberately not used — nonces and keys come
+# from `std::fs::File` on `/dev/urandom` (see `daemon/src/store/cipher.rs`).
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
