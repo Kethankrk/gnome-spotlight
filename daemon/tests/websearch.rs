@@ -254,7 +254,7 @@ fn activating_the_row_hands_the_url_to_the_shell_instead_of_opening_it() {
     let address = harness.address().to_string();
     let name = harness.name().to_string();
 
-    let (results, outcome, unknown, daemon_owned) = block(async move {
+    let (results, outcome, unknown) = block(async move {
         let connection = connect(&address).await.expect("connect to the bus");
         let proxy = engine_proxy(&connection, &name)
             .await
@@ -265,9 +265,8 @@ fn activating_the_row_hands_the_url_to_the_shell_instead_of_opening_it() {
 
         let outcome = activate(&proxy, &id, "open").await.expect("Activate");
         let unknown = activate(&proxy, "web:0000000000000000000000000000000000000000", "open").await;
-        let daemon_owned = activate(&proxy, "file:/home/me/report.pdf", "open").await;
 
-        (results, outcome, unknown, daemon_owned)
+        (results, outcome, unknown)
     });
 
     assert_eq!(text_of(&results[0], "id"), DEFAULT_ID);
@@ -286,16 +285,6 @@ fn activating_the_row_hands_the_url_to_the_shell_instead_of_opening_it() {
     assert!(
         unknown.is_err(),
         "a row this session never offered has no url to route"
-    );
-    let daemon_owned = daemon_owned.expect("a daemon-owned row still reports its recorded activation");
-    assert_eq!(
-        bool_of(&daemon_owned, "handled"),
-        false,
-        "its handler has not landed yet, so the daemon performs nothing"
-    );
-    assert!(
-        !daemon_owned.contains_key("shell_action"),
-        "a daemon-owned row is never shell-routed"
     );
 }
 

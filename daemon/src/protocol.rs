@@ -39,12 +39,21 @@ pub const PROVIDER_IDS: [&str; 8] = [
 /// The ids that may appear in the `Capabilities` property, in report order.
 pub const CAPABILITY_IDS: [&str; 5] = ["files", "recent", "clipboard", "calculator", "websearch"];
 
-/// The shell action that opens a url in the user's default browser: the one shell action the
-/// daemon routes today (the web-search row, ticket 08).
+/// The action id that opens a result: the primary action of a file, a recent document and a
+/// web-search row.
+pub const OPEN: &str = "open";
+/// The action id that copies what a result stands for. Only the shell owns the Wayland clipboard,
+/// so the daemon routes it instead of performing it (§2, §19).
+pub const COPY: &str = "copy";
+/// The action id that shows a result's location in the desktop's file manager — the shell's, since
+/// the file manager is the shell's (§2, §19).
+pub const REVEAL: &str = "reveal";
+
+/// The shell action that opens a url in the user's default browser (the web-search row, ticket 08).
 pub const OPEN_URL: &str = "open-url";
 
 /// Shell-only actions the daemon routes back to the extension instead of performing.
-pub const SHELL_ACTIONS: [&str; 1] = [OPEN_URL];
+pub const SHELL_ACTIONS: [&str; 3] = [OPEN_URL, COPY, REVEAL];
 
 /// The only values an action's `handler` field may take.
 pub const ACTION_HANDLERS: [&str; 4] = ["open", "copy", "reveal", "shell"];
@@ -203,6 +212,15 @@ pub fn provider_of_id(id: &str) -> Option<&'static str> {
     PROVIDER_IDS.iter().copied().find(|provider| {
         id_prefix(provider).is_some_and(|prefix| id.starts_with(prefix))
     })
+}
+
+/// The part of a result id after its provider prefix: the path a `file:`/`recent:` row stands for,
+/// the expression behind a `calc:` row. Empty when the id carries no prefix this daemon knows.
+pub fn id_payload(id: &str) -> String {
+    provider_of_id(id)
+        .and_then(id_prefix)
+        .map(|prefix| id[prefix.len()..].to_string())
+        .unwrap_or_default()
 }
 
 /// Convert an owned `a{sv}` map into a [`Row`].

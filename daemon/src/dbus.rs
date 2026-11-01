@@ -13,6 +13,7 @@ use zbus::fdo::{RequestNameFlags, RequestNameReply};
 use zbus::object_server::SignalEmitter;
 use zbus::{interface, Connection, OwnedVariant, Variant};
 
+use crate::opener::Opener;
 use crate::protocol::{self, ResultItem, Row, Rows};
 use crate::providers::clipboard::entry_row;
 use crate::providers::websearch::{self, Routes};
@@ -68,6 +69,8 @@ pub struct Engine {
     /// The urls the web-search rows this daemon offered point at, so `Activate` can route their
     /// ids back to them (the id is `web:<sha1(url)>`, which cannot be reversed).
     routes: Routes,
+    /// The program that opens a file with the desktop's default application (contract §19).
+    opener: Opener,
     /// What the user has been activating, shared with the registry's scorer (ticket 13).
     usage: Arc<UsageStore>,
 }
@@ -77,19 +80,30 @@ pub struct Engine {
 pub enum Routing {
     /// The daemon performed the action itself.
     Handled,
+    /// The daemon opens this uri with the desktop's default application: `open` on a file or a
+    /// recent document, which is the one action the daemon can perform without the shell.
+    Open { uri: String },
     /// The shell performs it: `shell_action` names it and `args` are its arguments. The daemon
-    /// does nothing with them — for `open-url` that is deliberate (contract §9: Lumen makes no
-    /// network request of its own; the shell opens the browser).
+    /// does nothing with them — `open-url` is the browser's (contract §9: Lumen makes no network
+    /// request of its own), and `copy`/`reveal` are the shell's because only the shell owns the
+    /// Wayland clipboard and the file manager.
     Shell { action: String, args: Vec<String> },
+}
+
+/// What routing a result needs besides its id: the web-search url table (a `web:<sha1(url)>` id
+/// cannot be reversed) and the clipboard history (a `clip:<digest>` id cannot be either).
+pub struct Session<'a> {
+    pub urls: &'a Routes,
+    pub clipboard: &'a ClipboardStore,
 }
 
 /// Why an `Activate` cannot be routed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unroutable {
-    /// A daemon-owned action whose handler lands with its own ticket (files 05, calculator 06,
-    /// clipboard 10). It is never handed to the shell: the shell cannot do it either.
+    /// An action on a result that has no handler: a `calc:` row offers `copy` and nothing else, an
+    /// `app:`/`action:`/`setting:` row is the shell's own and never reaches the engine.
     NoHandler { provider: String, action: String },
-    /// No row with that id in this session. The table only holds what this daemon offered.
+    /// No row with that id in this session. The tables only hold what this daemon offered.
     UnknownResult(String),
 }
 
@@ -98,7 +112,7 @@ impl std::fmt::Display for Unroutable {
         match self {
             Self::NoHandler { provider, action } => write!(
                 formatter,
-                "Lumen cannot perform `{action}` on a `{provider}` result yet"
+                "Lumen cannot perform `{action}` on a `{provider}` result"
             ),
             Self::UnknownResult(id) => write!(formatter, "Lumen does not know the result `{id}`"),
         }
@@ -107,31 +121,87 @@ impl std::fmt::Display for Unroutable {
 
 /// Route one action on one result (contract §2).
 ///
-/// Daemon-owned actions are performed in the daemon; a shell action is *not* performed here but
-/// named in the reply, and the extension runs it. `open-url` is the only shell action so far.
-pub fn route(result_id: &str, action_id: &str, routes: &Routes) -> Result<Routing, Unroutable> {
-    match protocol::provider_of_id(result_id) {
-        Some(websearch::PROVIDER) if action_id == websearch::OPEN_ACTION => {
-            match routes.url_of(result_id) {
-                Some(url) => Ok(Routing::Shell {
-                    action: protocol::OPEN_URL.to_string(),
-                    args: vec![url],
-                }),
-                None => Err(Unroutable::UnknownResult(result_id.to_string())),
-            }
+/// Daemon-owned actions either resolve to [`Routing::Open`] (the daemon opens the file) or to
+/// [`Routing::Handled`]; a shell action is *not* performed here but named in the reply, and the
+/// extension runs it. The decision itself is pure and does no I/O, so every outcome is testable
+/// without opening anything.
+pub fn route(result_id: &str, action_id: &str, session: &Session<'_>) -> Result<Routing, Unroutable> {
+    let Some(provider) = protocol::provider_of_id(result_id) else {
+        return Err(Unroutable::UnknownResult(result_id.to_string()));
+    };
+
+    let routing = match (provider, action_id) {
+        (websearch::PROVIDER, websearch::OPEN_ACTION) => match session.urls.url_of(result_id) {
+            Some(url) => Routing::Shell {
+                action: protocol::OPEN_URL.to_string(),
+                args: vec![url],
+            },
+            None => return Err(Unroutable::UnknownResult(result_id.to_string())),
+        },
+        // Opening a file or a recent document is the daemon's (it has the default-application
+        // launcher); showing it in Files and copying its path are the shell's.
+        ("files" | "recent", protocol::OPEN) => Routing::Open {
+            uri: payload(result_id)?,
+        },
+        ("files", protocol::REVEAL) => shell(protocol::REVEAL, payload(result_id)?),
+        ("files", protocol::COPY) => shell(protocol::COPY, payload(result_id)?),
+        // The calculator's value is recomputed from the expression in the id rather than kept in a
+        // per-session table: `Evaluate` is pure, so the reply needs no memory of the query.
+        ("calculator", protocol::COPY) => shell(protocol::COPY, calculation_text(result_id)?),
+        ("clipboard", protocol::COPY) => {
+            shell(protocol::COPY, clipboard_text(result_id, session)?)
         }
-        Some(provider) => Err(Unroutable::NoHandler {
-            provider: provider.to_string(),
-            action: action_id.to_string(),
-        }),
-        None => Err(Unroutable::UnknownResult(result_id.to_string())),
+        (_, action) => {
+            return Err(Unroutable::NoHandler {
+                provider: provider.to_string(),
+                action: action.to_string(),
+            })
+        }
+    };
+    Ok(routing)
+}
+
+/// The part of the id after the provider prefix, or an unknown result when there is nothing there:
+/// `file:` with no path is not a row this daemon made.
+fn payload(result_id: &str) -> Result<String, Unroutable> {
+    match protocol::id_payload(result_id) {
+        payload if payload.is_empty() => Err(Unroutable::UnknownResult(result_id.to_string())),
+        payload => Ok(payload),
     }
+}
+
+fn shell(action: &str, arg: String) -> Routing {
+    Routing::Shell {
+        action: action.to_string(),
+        args: vec![arg],
+    }
+}
+
+/// The value a `calc:` row copies: its display form, `4` or `6.213712 mi`.
+fn calculation_text(result_id: &str) -> Result<String, Unroutable> {
+    crate::calc::evaluate(&protocol::id_payload(result_id))
+        .map(|evaluation| evaluation.display())
+        .ok_or_else(|| Unroutable::UnknownResult(result_id.to_string()))
+}
+
+/// The text a `clip:` row copies: the entry as it was recorded. An entry the user has deleted
+/// since the row was offered is unknown, exactly like an id this session never made.
+fn clipboard_text(result_id: &str, session: &Session<'_>) -> Result<String, Unroutable> {
+    session
+        .clipboard
+        .list()
+        .into_iter()
+        .find(|entry| entry.id == result_id)
+        .map(|entry| entry.text)
+        .ok_or_else(|| Unroutable::UnknownResult(result_id.to_string()))
 }
 
 /// A routing outcome as the `a{sv}` `Activate` returns (contract §2).
 pub fn outcome_row(routing: Routing) -> Row {
     match routing {
-        Routing::Handled => Row::from([("handled".to_string(), Variant::new(true))]),
+        Routing::Handled | Routing::Open { .. } => {
+            Row::from([("handled".to_string(), Variant::new(true))])
+        }
         Routing::Shell { action, args } => Row::from([
             ("handled".to_string(), Variant::new(false)),
             ("shell_action".to_string(), Variant::new(action)),
@@ -168,21 +238,43 @@ impl Engine {
 
     /// Record the activation (usage learning, ticket 13) and route the action (contract §2).
     ///
-    /// The daemon performs the actions it owns. A shell-only action is not performed here: the
-    /// reply carries `handled: false` with `shell_action` and `args`, and the extension runs it.
-    /// A result this session never offered is an error; a daemon-owned row whose handler has not
-    /// landed yet still reports the activation it recorded.
+    /// The daemon performs the actions it owns — opening a file or a recent document with the
+    /// desktop's default application. A shell-only action (`open-url`, `copy`, `reveal`) is not
+    /// performed here: the reply carries `handled: false` with `shell_action` and `args`, and the
+    /// extension runs it. A result this session never offered is an error; a row whose action has
+    /// no handler at all still reports the activation it recorded.
     fn activate(&self, result_id: String, action_id: String) -> zbus::fdo::Result<Row> {
-        let mut row = match route(&result_id, &action_id, &self.routes) {
-            Ok(routing) => outcome_row(routing),
-            Err(Unroutable::NoHandler { .. }) => {
-                Row::from([("handled".to_string(), Variant::new(false))])
-            }
+        let session = Session {
+            urls: &self.routes,
+            clipboard: &self.clipboard,
+        };
+        let routing = match route(&result_id, &action_id, &session) {
+            Ok(routing) => Some(routing),
+            // An action with no handler: neither half performs it, so the reply says so and the
+            // activation is still recorded.
+            Err(Unroutable::NoHandler { .. }) => None,
             Err(Unroutable::UnknownResult(id)) => {
                 return Err(zbus::fdo::Error::NotSupported(format!(
                     "Lumen does not know the result `{id}`"
                 )));
             }
+        };
+
+        // The daemon-owned action happens before the reply, so `handled: true` means it happened.
+        // Nothing the shell can do would open a file the launcher could not start, so that failure
+        // is an error reply rather than a quiet "nothing to run".
+        let mut row = match routing {
+            Some(Routing::Open { uri }) => {
+                if let Err(reason) = self.opener.open(&uri) {
+                    eprintln!("lumen-daemon: could not open {uri}: {reason}");
+                    return Err(zbus::fdo::Error::Failed(format!(
+                        "Lumen could not open {uri}"
+                    )));
+                }
+                outcome_row(Routing::Handled)
+            }
+            Some(shell) => outcome_row(shell),
+            None => Row::from([("handled".to_string(), Variant::new(false))]),
         };
         row.insert(
             "recorded".to_string(),
@@ -346,6 +438,8 @@ pub async fn serve(config: Config) -> zbus::Result<Serving> {
         issued: Arc::clone(&issued),
         clipboard,
         routes,
+        // The default-application launcher (contract §19); `LUMEN_OPEN_BIN` overrides it for tests.
+        opener: Opener::from_environment(),
         usage,
     };
 
@@ -429,7 +523,7 @@ mod tests {
         );
     }
 
-    // ---- `Activate` routing (ticket 08, contract §2) ----
+    // ---- `Activate` routing (tickets 08 and 17, contract §2, §19) ----
 
     fn routes_with(id: &str, url: &str) -> Routes {
         let routes = Routes::new();
@@ -441,11 +535,22 @@ mod tests {
         row.get(key).and_then(|value| bool::try_from(value).ok())
     }
 
+    /// Routing against an empty url table and an empty history: what a request that names none of
+    /// the session's rows is routed with.
+    fn empty() -> (Routes, ClipboardStore) {
+        (Routes::new(), ClipboardStore::new())
+    }
+
     #[test]
     fn a_web_row_is_routed_to_the_shell_that_opens_it() {
         let routes = routes_with("web:abc", "https://duckduckgo.com/?q=x");
+        let clipboard = ClipboardStore::new();
+        let session = Session {
+            urls: &routes,
+            clipboard: &clipboard,
+        };
 
-        let routing = route("web:abc", "open", &routes).expect("the row routes");
+        let routing = route("web:abc", "open", &session).expect("the row routes");
 
         assert_eq!(
             routing,
@@ -459,6 +564,141 @@ mod tests {
             SHELL_ACTIONS.contains(&"open-url"),
             "and it is a shell action the contract names"
         );
+    }
+
+    #[test]
+    fn a_file_row_is_opened_by_the_daemon_and_shown_or_copied_by_the_shell() {
+        let (routes, clipboard) = empty();
+        let session = Session {
+            urls: &routes,
+            clipboard: &clipboard,
+        };
+
+        assert_eq!(
+            route("file:/home/me/report.pdf", "open", &session).expect("open routes"),
+            Routing::Open {
+                uri: "/home/me/report.pdf".to_string(),
+            },
+            "opening a file is the daemon's: it has the default-application launcher"
+        );
+        assert_eq!(
+            route("file:/home/me/report.pdf", "reveal", &session).expect("reveal routes"),
+            Routing::Shell {
+                action: "reveal".to_string(),
+                args: vec!["/home/me/report.pdf".to_string()],
+            },
+            "the file manager is the shell's, so `Show in Files` is routed to it"
+        );
+        assert_eq!(
+            route("file:/home/me/report.pdf", "copy", &session).expect("copy routes"),
+            Routing::Shell {
+                action: "copy".to_string(),
+                args: vec!["/home/me/report.pdf".to_string()],
+            },
+            "only the shell owns the Wayland clipboard"
+        );
+    }
+
+    #[test]
+    fn a_recent_document_is_opened_by_the_daemon() {
+        let (routes, clipboard) = empty();
+        let session = Session {
+            urls: &routes,
+            clipboard: &clipboard,
+        };
+
+        assert_eq!(
+            route("recent:/home/me/notes/report.md", "open", &session).expect("open routes"),
+            Routing::Open {
+                uri: "/home/me/notes/report.md".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_calculation_is_copied_by_the_shell_at_its_value() {
+        let (routes, clipboard) = empty();
+        let session = Session {
+            urls: &routes,
+            clipboard: &clipboard,
+        };
+
+        assert_eq!(
+            route("calc:2 + 2", "copy", &session).expect("copy routes"),
+            Routing::Shell {
+                action: "copy".to_string(),
+                args: vec!["4".to_string()],
+            },
+            "the value is recomputed from the expression in the id (story 26)"
+        );
+        assert_eq!(
+            route("calc:10 km in miles", "copy", &session).expect("copy routes"),
+            Routing::Shell {
+                action: "copy".to_string(),
+                args: vec!["6.213712 mi".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_clipboard_entry_is_copied_by_the_shell_at_its_text() {
+        let (routes, clipboard) = empty();
+        clipboard.set_enabled(true);
+        clipboard.push("https://example.com/pricing", 1_000);
+        let id = clipboard.list()[0].id.clone();
+        let session = Session {
+            urls: &routes,
+            clipboard: &clipboard,
+        };
+
+        assert_eq!(
+            route(&id, "copy", &session).expect("copy routes"),
+            Routing::Shell {
+                action: "copy".to_string(),
+                args: vec!["https://example.com/pricing".to_string()],
+            },
+            "the digest in the id cannot be reversed: the history answers for it (story 46)"
+        );
+
+        assert!(
+            matches!(
+                route("clip:0000000000000000", "copy", &session),
+                Err(Unroutable::UnknownResult(_))
+            ),
+            "an entry the history no longer holds is unknown"
+        );
+    }
+
+    #[test]
+    fn a_result_whose_action_has_no_handler_is_refused() {
+        let (routes, clipboard) = empty();
+        let session = Session {
+            urls: &routes,
+            clipboard: &clipboard,
+        };
+
+        for (id, provider, action) in [
+            ("file:/home/me/report.pdf", "files", "delete"),
+            ("calc:2 + 2", "calculator", "open"),
+            ("calc:2 + 2", "calculator", "reveal"),
+            ("clip:8d1", "clipboard", "open"),
+            ("recent:/home/me/report.md", "recent", "copy"),
+            ("web:def", "websearch", "reveal"),
+            ("app:org.gnome.Nautilus.desktop", "applications", "open"),
+            ("action:lock", "actions", "run"),
+            ("setting:wifi", "settings", "toggle"),
+        ] {
+            match route(id, action, &session) {
+                Err(Unroutable::NoHandler {
+                    provider: named,
+                    action: named_action,
+                }) => {
+                    assert_eq!(named, provider, "{id} belongs to {provider}");
+                    assert_eq!(named_action, action);
+                }
+                other => panic!("`{action}` on {id} must not be routed: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -483,55 +723,37 @@ mod tests {
 
     #[test]
     fn a_handled_outcome_carries_nothing_but_handled() {
-        let row = outcome_row(Routing::Handled);
+        for routing in [Routing::Handled, Routing::Open { uri: "/home/me/x".to_string() }] {
+            let row = outcome_row(routing);
 
-        assert_eq!(bool_field(&row, "handled"), Some(true));
-        assert!(
-            !row.contains_key("shell_action") && !row.contains_key("args"),
-            "a performed action has nothing for the shell to do"
-        );
-    }
-
-    #[test]
-    fn a_daemon_owned_row_is_never_shell_routed() {
-        let routes = Routes::new();
-
-        for (id, provider) in [
-            ("file:/home/me/report.pdf", "files"),
-            ("calc:2 + 2", "calculator"),
-            ("clip:8d1", "clipboard"),
-            ("recent:file:///home/me/report.pdf", "recent"),
-        ] {
-            match route(id, "open", &routes) {
-                Err(Unroutable::NoHandler {
-                    provider: named,
-                    action,
-                }) => {
-                    assert_eq!(named, provider, "{id} belongs to {provider}");
-                    assert_eq!(action, "open");
-                }
-                other => panic!("{id} must not be routed: {other:?}"),
-            }
+            assert_eq!(bool_field(&row, "handled"), Some(true));
+            assert!(
+                !row.contains_key("shell_action") && !row.contains_key("args"),
+                "a performed action has nothing for the shell to do"
+            );
         }
-
-        assert!(
-            route("app:org.gnome.Nautilus.desktop", "open", &routes).is_err(),
-            "applications never reach the engine's Activate"
-        );
     }
 
     #[test]
     fn a_row_the_session_never_offered_is_refused() {
         let routes = routes_with("web:abc", "https://duckduckgo.com/?q=x");
+        let clipboard = ClipboardStore::new();
+        let session = Session {
+            urls: &routes,
+            clipboard: &clipboard,
+        };
 
-        for id in ["web:def", "nonsense", ""] {
+        for id in ["web:def", "nonsense", "", "file:", "recent:"] {
             assert!(
-                matches!(route(id, "open", &routes), Err(Unroutable::UnknownResult(_))),
-                "`{id}` was never offered, so its url is unknown"
+                matches!(
+                    route(id, "open", &session),
+                    Err(Unroutable::UnknownResult(_))
+                ),
+                "`{id}` is nothing this session offered"
             );
         }
         assert!(
-            route("web:abc", "copy", &routes).is_err(),
+            route("web:abc", "copy", &session).is_err(),
             "the web row offers exactly one action"
         );
     }

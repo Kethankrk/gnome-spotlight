@@ -301,7 +301,7 @@ fn a_single_entry_can_be_deleted_and_the_whole_history_cleared() {
 }
 
 #[test]
-fn clipboard_entries_are_matched_by_the_scorer_and_carry_a_copy_action() {
+fn clipboard_entries_are_matched_by_the_scorer_and_carry_a_copy_and_a_delete_action() {
     let harness = Harness::spawn();
     let address = harness.address().to_string();
     let name = harness.name().to_string();
@@ -326,9 +326,18 @@ fn clipboard_entries_are_matched_by_the_scorer_and_carry_a_copy_action() {
     );
 
     let actions = actions_of(&matching[0]);
-    assert_eq!(actions.len(), 1, "a clipboard entry has one action");
-    assert_eq!(text_of(&actions[0], "id"), "copy");
-    assert_eq!(text_of(&actions[0], "handler"), "copy");
+    let described: Vec<(String, String)> = actions
+        .iter()
+        .map(|action| (text_of(action, "id"), text_of(action, "handler")))
+        .collect();
+    assert_eq!(
+        described,
+        vec![
+            ("copy".to_string(), "copy".to_string()),
+            ("delete".to_string(), "shell".to_string()),
+        ],
+        "an entry can be copied back and forgotten (stories 46 and 48)"
+    );
 
     assert!(
         unrelated.is_empty(),

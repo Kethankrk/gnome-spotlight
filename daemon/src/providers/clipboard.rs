@@ -21,8 +21,12 @@ pub const DISABLED_ID: &str = "clip:disabled";
 const DISABLED_TITLE: &str = "Clipboard history is off";
 const DISABLED_SUBTITLE: &str = "Copied text is only recorded once you turn it on";
 
-/// The action every entry carries. `Activate` performs it (see the ticket handoff note).
+/// The two actions every entry carries. `copy` puts the text back on the clipboard and `delete`
+/// forgets this entry (user stories 46 and 48): both are the shell's to run — the clipboard itself
+/// is the shell's, and `ClipboardDelete` is the call the shell makes for the second — so neither is
+/// performed by `Activate`.
 const COPY: (&str, &str, &str) = ("copy", "Copy", "copy");
+const DELETE: (&str, &str, &str) = ("delete", "Delete", "shell");
 
 /// Entries from the shared in-memory history (ticket 10; ticket 11 makes it persistent).
 pub struct ClipboardProvider {
@@ -67,7 +71,10 @@ impl Provider for ClipboardProvider {
 /// One history entry as a contract §3 result. Compact preview per contract §6.
 pub fn entry_row(entry: &ClipEntry) -> ResultItem {
     let mut item = ResultItem::new(PROVIDER_ID, entry.id.clone(), entry.text.clone());
-    item.actions = vec![Action::new(COPY.0, COPY.1, COPY.2)];
+    item.actions = vec![
+        Action::new(COPY.0, COPY.1, COPY.2),
+        Action::new(DELETE.0, DELETE.1, DELETE.2),
+    ];
     item.preview = Row::from([
         ("kind".to_string(), Variant::new("clipboard".to_string())),
         ("text".to_string(), Variant::new(entry.text.clone())),
@@ -129,7 +136,16 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "https://example.com/pricing");
         assert_eq!(rows[0].id, crate::store::clipboard::entry_id("https://example.com/pricing"));
-        assert_eq!(rows[0].actions[0].handler, "copy");
+        let actions: Vec<(&str, &str)> = rows[0]
+            .actions
+            .iter()
+            .map(|action| (action.id.as_str(), action.handler.as_str()))
+            .collect();
+        assert_eq!(
+            actions,
+            vec![("copy", "copy"), ("delete", "shell")],
+            "an entry can be copied back and forgotten (stories 46 and 48)"
+        );
         assert_eq!(rows[0].timestamp, Some(1_000));
         assert_eq!(
             crate::protocol::string_field(&rows[0].preview, "kind").as_deref(),

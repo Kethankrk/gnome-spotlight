@@ -21,6 +21,10 @@ use zbus::Proxy;
 pub const OBJECT_PATH: &str = "/org/gnome/Lumen";
 pub const INTERFACE: &str = "org.gnome.Lumen.Engine";
 
+/// What the daemon opens a uri with unless a test names its own program: `LUMEN_OPEN_BIN` is the
+/// opener's seam (contract §19), and a suite must not launch the developer's applications.
+pub const DEFAULT_TEST_OPEN_BIN: &str = "/bin/true";
+
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -85,6 +89,11 @@ impl Harness {
             .arg("--object-path")
             .arg(OBJECT_PATH)
             .env("DBUS_SESSION_BUS_ADDRESS", &address)
+            // The daemon opens a `file:` row with the desktop's default application. A test suite
+            // must never launch the developer's applications, so unless a test names its own
+            // program the opener is `/bin/true` (contract §19; see `daemon/tests/activation.rs`
+            // for the tests that watch what is opened).
+            .env("LUMEN_OPEN_BIN", DEFAULT_TEST_OPEN_BIN)
             .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

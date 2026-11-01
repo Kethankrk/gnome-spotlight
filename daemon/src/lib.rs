@@ -9,6 +9,7 @@ pub mod dbus;
 pub mod excludes;
 pub mod index;
 pub mod notify;
+pub mod opener;
 pub mod protocol;
 pub mod providers;
 pub mod ranking;
