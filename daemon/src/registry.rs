@@ -13,6 +13,7 @@ use crate::providers::websearch::{self, WebSearch};
 use crate::providers::{files, recent, Provider, QueryRequest, Stub};
 use crate::ranking;
 use crate::store::clipboard::ClipboardStore;
+use crate::store::usage::UsageStore;
 
 /// How the daemon reaches the file index. The index is behind its own seam so that the daemon
 /// can run, and its tests can run, on a machine without an index.
@@ -35,6 +36,8 @@ pub struct Registry {
     /// wanted — so the `search-engine` setting is read for a query that dead-ended rather than for
     /// every keystroke. It also owns the url table `Activate` routes through.
     websearch: WebSearch,
+    /// What the user has been activating, keyed by result id (contract §5's usage term).
+    usage: Arc<UsageStore>,
 }
 
 impl Registry {
@@ -46,8 +49,16 @@ impl Registry {
     /// Building it opens the index, which for `LocalSearch` means loading the library and probing
     /// the endpoint on this thread — before the bus name is owned, so the capability is right
     /// before the first client can ask. Later queries run on the search thread (see `dbus.rs`).
+    ///
+    /// Usage-based ranking comes from [`Registry::with_usage`]; this constructor is for callers
+    /// with nothing to remember (tests and one-off builds).
     pub fn new(indexer: &Indexer, clipboard: Arc<ClipboardStore>) -> Self {
-        Self::with_engine(indexer, clipboard, websearch::EngineSetting::from_environment())
+        Self::build(
+            indexer,
+            clipboard,
+            websearch::EngineSetting::from_environment(),
+            Arc::new(UsageStore::new()),
+        )
     }
 
     /// [`Registry::new`] with the web-search row's engine setting replaced. The daemon reads the
@@ -56,6 +67,30 @@ impl Registry {
         indexer: &Indexer,
         clipboard: Arc<ClipboardStore>,
         engine: websearch::EngineSetting,
+    ) -> Self {
+        Self::build(indexer, clipboard, engine, Arc::new(UsageStore::new()))
+    }
+
+    /// [`Registry::new`] with the usage counters the daemon learns from, so the results the user
+    /// activates most rank higher (contract §5, ticket 13).
+    pub fn with_usage(
+        indexer: &Indexer,
+        clipboard: Arc<ClipboardStore>,
+        usage: Arc<UsageStore>,
+    ) -> Self {
+        Self::build(
+            indexer,
+            clipboard,
+            websearch::EngineSetting::from_environment(),
+            usage,
+        )
+    }
+
+    fn build(
+        indexer: &Indexer,
+        clipboard: Arc<ClipboardStore>,
+        engine: websearch::EngineSetting,
+        usage: Arc<UsageStore>,
     ) -> Self {
         let index = index::open(indexer);
         let websearch = WebSearch::new(engine);
@@ -78,6 +113,7 @@ impl Registry {
         Self {
             providers,
             websearch,
+            usage,
         }
     }
 
@@ -146,6 +182,9 @@ impl Registry {
         }
 
         for item in &mut items {
+            // What the user has been choosing weights the score (contract §5), so the counters are
+            // read before the scorer runs, never after.
+            item.usage = self.usage.count(&item.id);
             item.score = ranking::score(item, &request.text, now_ms);
         }
 
@@ -377,6 +416,55 @@ mod tests {
     }
 
     #[test]
+    fn activations_recorded_in_the_usage_store_promote_a_result() {
+        let usage = Arc::new(UsageStore::new());
+        let registry = Registry::with_usage(
+            &Indexer::None,
+            Arc::new(ClipboardStore::new()),
+            Arc::clone(&usage),
+        );
+
+        let candidates = || {
+            vec![
+                ResultItem::new("applications", "app:org.gnome.Notes.desktop", "Notes"),
+                ResultItem::new("files", "file:/home/me/notes-old", "notes-old"),
+            ]
+        };
+        let request = || {
+            QueryRequest::new(
+                "note",
+                vec!["applications".to_string(), "files".to_string()],
+            )
+            .with_injected(candidates())
+        };
+
+        let before = registry.query_at(&request(), 0);
+        assert_eq!(
+            before[0].provider, "applications",
+            "the app's heavier base weight wins first: {before:?}"
+        );
+
+        for _ in 0..20 {
+            usage.record("file:/home/me/notes-old");
+        }
+
+        let after = registry.query_at(&request(), 0);
+        assert_eq!(after[0].id, "file:/home/me/notes-old");
+        assert_eq!(after[0].usage, 20, "the count reached the candidate");
+        assert_eq!(after[1].usage, 0, "an untouched result scores without a bonus");
+        assert!(
+            (after[0].score - 1.20).abs() < 1e-9,
+            "files 0.20 + prefix 0.8 + usage 0.20, got {}",
+            after[0].score
+        );
+        assert!(
+            (after[1].score - 1.10).abs() < 1e-9,
+            "applications 0.30 + prefix 0.8, got {}",
+            after[1].score
+        );
+    }
+
+    #[test]
     fn a_strong_match_suppresses_the_web_search_row() {
         let registry = Registry::with_stubs(&Indexer::None);
         let enabled = vec!["applications".to_string(), websearch::PROVIDER.to_string()];
@@ -477,6 +565,39 @@ mod tests {
                 .as_deref(),
             Some("https://searx.example/?q=how%20tall%20is%20everest"),
             "Activate routes the id back through the same table"
+        );
+    }
+
+    #[test]
+    fn an_exact_match_outranks_a_loosely_matching_result_however_often_it_is_used() {
+        let usage = Arc::new(UsageStore::new());
+        let registry = Registry::with_usage(
+            &Indexer::None,
+            Arc::new(ClipboardStore::new()),
+            Arc::clone(&usage),
+        );
+
+        // The file matches only at a word start, and is used far past the scorer's cap.
+        for _ in 0..50 {
+            usage.record("file:/home/me/My Files Backup");
+        }
+
+        let request = QueryRequest::new(
+            "files",
+            vec!["applications".to_string(), "files".to_string()],
+        )
+        .with_injected(vec![
+            ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files"),
+            ResultItem::new("files", "file:/home/me/My Files Backup", "My Files Backup"),
+        ]);
+
+        let results = registry.query_at(&request, 0);
+        assert_eq!(results[0].provider, "applications");
+        assert!((results[0].score - 1.30).abs() < 1e-9);
+        assert!(
+            (results[1].score - 1.00).abs() < 1e-9,
+            "0.20 + 0.6 + the capped 0.20 bonus, got {}",
+            results[1].score
         );
     }
 }

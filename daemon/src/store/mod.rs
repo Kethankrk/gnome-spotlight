@@ -2,5 +2,7 @@
 //! on-disk one; nothing else in the daemon should have to change.
 
 pub mod clipboard;
+pub mod usage;
 
 pub use clipboard::{ClipEntry, ClipboardStore};
+pub use usage::UsageStore;

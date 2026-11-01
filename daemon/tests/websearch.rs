@@ -287,9 +287,15 @@ fn activating_the_row_hands_the_url_to_the_shell_instead_of_opening_it() {
         unknown.is_err(),
         "a row this session never offered has no url to route"
     );
+    let daemon_owned = daemon_owned.expect("a daemon-owned row still reports its recorded activation");
+    assert_eq!(
+        bool_of(&daemon_owned, "handled"),
+        false,
+        "its handler has not landed yet, so the daemon performs nothing"
+    );
     assert!(
-        daemon_owned.is_err(),
-        "a daemon-owned row is not shell-routed: its handler lands with its ticket"
+        !daemon_owned.contains_key("shell_action"),
+        "a daemon-owned row is never shell-routed"
     );
 }
 

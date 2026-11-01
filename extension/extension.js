@@ -524,6 +524,11 @@ export default class LumenExtension extends Extension {
             return;
         }
 
+        // The shell launches applications itself, so the engine would never otherwise hear that one
+        // was activated. Frequency is what makes the applications the user reaches for rank first
+        // (ticket 13), so the activation is reported before the launch.
+        this._notifyActivation(result);
+
         try {
             if (newWindow && app.can_open_new_window()) {
                 app.open_new_window(-1);
@@ -539,6 +544,25 @@ export default class LumenExtension extends Extension {
         }
 
         this._overlay?.close();
+    }
+
+    // Usage learning (ticket 13): an application is launched here, never through the engine, so the
+    // shell is the only half that knows it was chosen. Fire and forget — the launch has already
+    // happened, and failing to report it must never be shown to the user or stop the launch.
+    _notifyActivation(result) {
+        if (this._engine.status !== EngineStatus.OK || !this._proxy)
+            return;
+
+        const actionId = result.actions?.[0]?.id ?? 'open';
+        const call = new GLib.Variant('(ss)', [result.id, actionId]);
+
+        this._proxy.call('Activate', call, Gio.DBusCallFlags.NONE, -1, null, (proxy, reply) => {
+            try {
+                proxy.call_finish(reply);
+            } catch (error) {
+                logError(error, `Lumen: could not record the activation of ${result.id}`);
+            }
+        });
     }
 
     _activateWithEngine(result) {

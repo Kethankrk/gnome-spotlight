@@ -122,6 +122,40 @@ mod tests {
     }
 
     #[test]
+    fn an_exact_match_beats_a_loose_match_however_often_it_is_used() {
+        let now = 0;
+        let exact = item("applications", "Files");
+
+        // The competition: a loose (word-start) match, as fresh as possible and used far past the
+        // scorer's cap of 20 activations.
+        let mut used_file = item("files", "My Files Backup");
+        used_file.timestamp = Some(now);
+        used_file.usage = 10_000;
+        let mut used_app = item("applications", "My Files Backup");
+        used_app.usage = 10_000;
+        // And frequency with no match at all, which must not rescue a result.
+        let mut used_nothing = item("applications", "Anything Else");
+        used_nothing.usage = 10_000;
+
+        assert_eq!(score(&exact, "files", now), 1.30);
+
+        for (label, loose) in [("file", &used_file), ("application", &used_app)] {
+            let loose = score(loose, "files", now);
+            assert!(
+                loose < 1.30,
+                "a loosely matching {label} at the usage cap scores {loose}, which must stay under \
+                 an exact match's 1.30"
+            );
+        }
+
+        assert_eq!(
+            score(&used_nothing, "files", now),
+            0.30 + 0.20,
+            "usage is a bonus on a match, never a substitute for one"
+        );
+    }
+
+    #[test]
     fn recency_and_usage_are_bounded() {
         assert_eq!(recency_bonus(None, 0), 0.0);
         assert_eq!(recency_bonus(Some(0), 0), 0.10);

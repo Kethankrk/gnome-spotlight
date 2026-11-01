@@ -19,6 +19,7 @@ use crate::providers::websearch::{self, Routes};
 use crate::providers::QueryRequest;
 use crate::registry::{Indexer, Registry};
 use crate::store::clipboard::ClipboardStore;
+use crate::store::usage::UsageStore;
 
 /// Everything the daemon needs to serve its side of the contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +64,8 @@ pub struct Engine {
     /// The urls the web-search rows this daemon offered point at, so `Activate` can route their
     /// ids back to them (the id is `web:<sha1(url)>`, which cannot be reversed).
     routes: Routes,
+    /// What the user has been activating, shared with the registry's scorer (ticket 13).
+    usage: Arc<UsageStore>,
 }
 
 /// What `Activate` does with one (result, action) pair (contract §2).
@@ -159,14 +162,30 @@ impl Engine {
         self.clipboard.set_enabled(enabled);
     }
 
-    /// Route one action on one result (contract §2).
+    /// Record the activation (usage learning, ticket 13) and route the action (contract §2).
     ///
     /// The daemon performs the actions it owns. A shell-only action is not performed here: the
     /// reply carries `handled: false` with `shell_action` and `args`, and the extension runs it.
+    /// A result this session never offered is an error; a daemon-owned row whose handler has not
+    /// landed yet still reports the activation it recorded.
     fn activate(&self, result_id: String, action_id: String) -> zbus::fdo::Result<Row> {
-        route(&result_id, &action_id, &self.routes)
-            .map(outcome_row)
-            .map_err(|unroutable| zbus::fdo::Error::NotSupported(unroutable.to_string()))
+        let mut row = match route(&result_id, &action_id, &self.routes) {
+            Ok(routing) => outcome_row(routing),
+            Err(Unroutable::NoHandler { .. }) => {
+                Row::from([("handled".to_string(), Variant::new(false))])
+            }
+            Err(Unroutable::UnknownResult(id)) => {
+                return Err(zbus::fdo::Error::NotSupported(format!(
+                    "Lumen does not know the result `{id}`"
+                )));
+            }
+        };
+        row.insert(
+            "recorded".to_string(),
+            Variant::new(!result_id.is_empty()),
+        );
+        row.insert("usage".to_string(), Variant::new(self.usage.record(&result_id)));
+        Ok(row)
     }
 
     /// Start a search and return its id. Results arrive as signals.
@@ -287,7 +306,14 @@ fn timestamp_of(timestamp_ms: u64) -> i64 {
 /// Own `config.dbus_name`, export the engine and start the search thread.
 pub async fn serve(config: Config) -> zbus::Result<Serving> {
     let clipboard = Arc::new(ClipboardStore::new());
-    let registry = Arc::new(Registry::new(&config.indexer, Arc::clone(&clipboard)));
+    // What the user has been activating, read back from the data directory (or held in memory when
+    // there is nowhere to write it); shared by the recorder and the scorer.
+    let usage = Arc::new(UsageStore::from_env());
+    let registry = Arc::new(Registry::with_usage(
+        &config.indexer,
+        Arc::clone(&clipboard),
+        Arc::clone(&usage),
+    ));
     let issued = Arc::new(AtomicU64::new(0));
     let (jobs_tx, jobs_rx) = mpsc::channel();
 
@@ -300,6 +326,7 @@ pub async fn serve(config: Config) -> zbus::Result<Serving> {
         issued: Arc::clone(&issued),
         clipboard,
         routes,
+        usage,
     };
 
     let name = config.dbus_name.clone();
