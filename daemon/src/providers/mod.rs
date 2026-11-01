@@ -4,7 +4,9 @@
 //! the ones the extension computes and injects — is reached through [`Provider`]. Tests inject
 //! fakes here instead of standing up LocalSearch or a clipboard store.
 
+pub mod calculator;
 pub mod clipboard;
+pub mod files;
 
 use crate::protocol::ResultItem;
 
@@ -19,6 +21,11 @@ pub struct QueryRequest {
     /// Candidate results the extension computed itself (applications, system actions, setting
     /// toggles). The registry ranks these alongside the daemon's own providers.
     pub injected: Vec<ResultItem>,
+    /// How many results a paging provider should return for this request, when the caller said.
+    pub limit: Option<usize>,
+    /// Where in the provider's own ordering to start. Paging is per provider: the extension
+    /// pages the file list without re-running the whole search.
+    pub offset: usize,
 }
 
 impl QueryRequest {
@@ -27,11 +34,21 @@ impl QueryRequest {
             text: text.into(),
             enabled,
             injected: Vec::new(),
+            limit: None,
+            offset: 0,
         }
     }
 
     pub fn with_injected(mut self, injected: Vec<ResultItem>) -> Self {
         self.injected = injected;
+        self
+    }
+
+    /// Ask for one page: at most `limit` results (the provider's default when `None`), starting
+    /// at `offset`.
+    pub fn with_paging(mut self, limit: Option<usize>, offset: usize) -> Self {
+        self.limit = limit;
+        self.offset = offset;
         self
     }
 

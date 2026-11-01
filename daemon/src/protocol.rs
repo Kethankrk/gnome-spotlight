@@ -45,6 +45,11 @@ pub const SHELL_ACTIONS: [&str; 1] = ["open-url"];
 /// The only values an action's `handler` field may take.
 pub const ACTION_HANDLERS: [&str; 4] = ["open", "copy", "reveal", "shell"];
 
+/// The `Query` option that pages a provider: how many results to return.
+pub const OPTION_LIMIT: &str = "limit";
+/// The `Query` option that pages a provider: where in its own ordering to start.
+pub const OPTION_OFFSET: &str = "offset";
+
 /// The fields every result row carries, and their `a{sv}` signature.
 pub const RESULT_FIELDS: [&str; 8] = [
     "id", "provider", "title", "subtitle", "icon", "score", "actions", "preview",
@@ -204,6 +209,26 @@ pub fn injected_rows(option: &Variant<'_>) -> Vec<Row> {
     rows.into_iter().map(owned_row).collect()
 }
 
+/// Read a non-negative integer from `Query`'s `options`, accepting whichever integer type the
+/// caller used. Anything else — a string, a negative number, a type it cannot convert — is
+/// treated as absent, so a malformed option never fails a search.
+pub fn option_usize(options: &HashMap<String, OwnedVariant>, key: &str) -> Option<usize> {
+    let value = options.get(key)?;
+    if let Ok(unsigned) = u32::try_from(value) {
+        return usize::try_from(unsigned).ok();
+    }
+    if let Ok(unsigned) = u64::try_from(value) {
+        return usize::try_from(unsigned).ok();
+    }
+    if let Ok(signed) = i32::try_from(value) {
+        return usize::try_from(signed).ok();
+    }
+    if let Ok(signed) = i64::try_from(value) {
+        return usize::try_from(signed).ok();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +290,27 @@ mod tests {
         for id in CAPABILITY_IDS {
             assert!(PROVIDER_IDS.contains(&id), "{id} is not a provider");
         }
+    }
+
+    #[test]
+    fn the_paging_options_accept_any_integer_type() {
+        let mut options: HashMap<String, OwnedVariant> = HashMap::new();
+        options.insert(
+            OPTION_LIMIT.to_string(),
+            OwnedVariant::try_from(Variant::from(8u32)).unwrap(),
+        );
+        options.insert(
+            OPTION_OFFSET.to_string(),
+            OwnedVariant::try_from(Variant::from(-4i32)).unwrap(),
+        );
+        options.insert(
+            "text".to_string(),
+            OwnedVariant::try_from(Variant::from("nonsense".to_string())).unwrap(),
+        );
+
+        assert_eq!(option_usize(&options, OPTION_LIMIT), Some(8));
+        assert_eq!(option_usize(&options, OPTION_OFFSET), None, "a negative page");
+        assert_eq!(option_usize(&options, "text"), None, "wrong type");
+        assert_eq!(option_usize(&options, "absent"), None);
     }
 }

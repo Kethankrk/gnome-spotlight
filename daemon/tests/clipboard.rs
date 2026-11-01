@@ -374,7 +374,7 @@ fn nothing_reaches_the_filesystem() {
     std::fs::create_dir_all(&root).expect("a scratch home");
     let home = root.to_str().expect("a utf-8 path").to_string();
 
-    let harness = Harness::spawn_with_env(&[
+    let harness = Harness::spawn_with_env(&[], &[
         ("HOME", &home),
         ("XDG_DATA_HOME", &format!("{home}/data")),
         ("XDG_CONFIG_HOME", &format!("{home}/config")),

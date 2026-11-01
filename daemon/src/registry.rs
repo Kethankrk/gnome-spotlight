@@ -5,14 +5,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::index;
 use crate::protocol::{ResultItem, CAPABILITY_IDS, PROVIDER_IDS};
+use crate::providers::calculator::Calculator;
 use crate::providers::clipboard::{self, ClipboardProvider};
-use crate::providers::{Provider, QueryRequest, Stub};
+use crate::providers::{files, Provider, QueryRequest, Stub};
 use crate::ranking;
 use crate::store::clipboard::ClipboardStore;
 
-/// How the daemon reaches LocalSearch/TinySPARQL. The indexer is behind its own seam so that the
-/// daemon can run, and its tests can run, on a machine without an index.
+/// How the daemon reaches the file index. The index is behind its own seam so that the daemon
+/// can run, and its tests can run, on a machine without an index.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Indexer {
     /// No indexer: the `files` capability is absent.
@@ -20,12 +22,9 @@ pub enum Indexer {
     None,
     /// A test double in place of the real indexer, optionally seeded from a file.
     Fake { seed: Option<PathBuf> },
-}
-
-impl Indexer {
-    pub fn available(&self) -> bool {
-        !matches!(self, Indexer::None)
-    }
+    /// GNOME LocalSearch / TinySPARQL, loaded at run time. Unavailable, and reported as such,
+    /// when the library is missing or no endpoint answers.
+    LocalSearch,
 }
 
 pub struct Registry {
@@ -33,28 +32,37 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The registry a ticket-01 daemon runs: the clipboard provider wired to a fresh, empty
-    /// history, every other provider still a stub.
-    pub fn with_stubs(indexer: &Indexer) -> Self {
-        Self::new(indexer, Arc::new(ClipboardStore::new()))
-    }
-
-    /// The registry the daemon actually serves, sharing one clipboard history with its D-Bus
-    /// interface.
+    /// The registry the daemon serves: every provider present, `files` backed by whichever index
+    /// the configuration selected, the calculator real, the clipboard sharing `clipboard`, and
+    /// the rest still stubs until their ticket lands.
+    ///
+    /// Building it opens the index, which for `LocalSearch` means loading the library and probing
+    /// the endpoint on this thread — before the bus name is owned, so the capability is right
+    /// before the first client can ask. Later queries run on the search thread (see `dbus.rs`).
     pub fn new(indexer: &Indexer, clipboard: Arc<ClipboardStore>) -> Self {
-        let providers = PROVIDER_IDS
-            .iter()
-            .map(|id| {
-                if *id == clipboard::PROVIDER_ID {
-                    Box::new(ClipboardProvider::new(Arc::clone(&clipboard))) as Box<dyn Provider>
-                } else {
-                    let available = is_available(id, indexer);
-                    Box::new(Stub::new(id, available)) as Box<dyn Provider>
-                }
-            })
-            .collect();
+        let index = index::open(indexer);
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(Stub::new("applications", false)),
+            Box::new(files::Files::new(Arc::clone(&index))),
+            Box::new(Stub::new("recent", false)),
+            Box::new(ClipboardProvider::new(Arc::clone(&clipboard))),
+            Box::new(Calculator::new()),
+            Box::new(Stub::new("actions", false)),
+            Box::new(Stub::new("settings", false)),
+            Box::new(Stub::new("websearch", true)),
+        ];
+        debug_assert_eq!(
+            providers.iter().map(|p| p.id()).collect::<Vec<_>>(),
+            PROVIDER_IDS.to_vec(),
+            "the registry lists the providers in contract order"
+        );
 
         Self { providers }
+    }
+
+    /// A registry with a fresh, empty clipboard history. Convenient for tests.
+    pub fn with_stubs(indexer: &Indexer) -> Self {
+        Self::new(indexer, Arc::new(ClipboardStore::new()))
     }
 
     /// The provider ids the daemon knows, in contract order.
@@ -107,7 +115,9 @@ impl Registry {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| ranking::provider_rank(&a.provider).cmp(&ranking::provider_rank(&b.provider)))
+                .then_with(|| {
+                    ranking::provider_rank(&a.provider).cmp(&ranking::provider_rank(&b.provider))
+                })
                 .then_with(|| a.title.cmp(&b.title))
         });
 
@@ -120,16 +130,6 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
-}
-
-/// Whether the *stub* provider with this id can answer. Providers that have landed (the clipboard)
-/// decide for themselves, so they never appear here.
-fn is_available(id: &str, indexer: &Indexer) -> bool {
-    match id {
-        "files" => indexer.available(),
-        "calculator" | "websearch" => true,
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -168,10 +168,47 @@ mod tests {
     }
 
     #[test]
-    fn stubs_contribute_no_results() {
+    fn an_empty_index_contributes_no_results() {
         let registry = Registry::with_stubs(&Indexer::Fake { seed: None });
         let request = QueryRequest::new("nautilus", vec!["files".to_string()]);
         assert!(registry.query(&request).is_empty());
+    }
+
+    #[test]
+    fn a_seeded_index_feeds_the_files_provider() {
+        let seed = std::env::temp_dir().join(format!(
+            "lumen-registry-seed-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &seed,
+            r#"{"files": [{"path": "/home/me/notes/report.md", "size": 10, "mtime_ms": 1700000000000}]}"#,
+        )
+        .expect("write a seed");
+
+        let registry = Registry::with_stubs(&Indexer::Fake {
+            seed: Some(seed.clone()),
+        });
+        let results = registry.query(&QueryRequest::new("report", vec!["files".to_string()]));
+        std::fs::remove_file(&seed).ok();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].provider, "files");
+        assert_eq!(results[0].id, "file:/home/me/notes/report.md");
+        assert_eq!(results[0].score, 0.20 + 0.8, "base weight plus prefix quality");
+    }
+
+    #[test]
+    fn without_an_index_the_extensions_own_results_still_rank() {
+        let registry = Registry::with_stubs(&Indexer::None);
+        let app = ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files");
+        let request =
+            QueryRequest::new("files", vec!["applications".to_string(), "files".to_string()])
+                .with_injected(vec![app]);
+
+        let results = registry.query(&request);
+        assert_eq!(results.len(), 1, "the file provider stays silent");
+        assert_eq!(results[0].provider, "applications");
     }
 
     #[test]
@@ -190,6 +227,52 @@ mod tests {
         assert_eq!(enabled.len(), 1);
         assert_eq!(enabled[0].title, "https://example.com/pricing");
         assert!(enabled[0].score > 0.0, "the registry scores every result");
+    }
+
+    #[test]
+    fn an_expression_scores_the_calculators_base_weight_and_is_alone() {
+        let registry = Registry::with_stubs(&Indexer::None);
+
+        let results = registry.query_at(&QueryRequest::new("2 + 2", vec!["calculator".to_string()]), 0);
+        assert_eq!(results.len(), 1, "one candidate, and no error row");
+        assert_eq!(results[0].provider, "calculator");
+        assert_eq!(results[0].id, "calc:2 + 2");
+        assert!(
+            (results[0].score - 0.40).abs() < 1e-9,
+            "base weight 0.40 + no title match, got {}",
+            results[0].score
+        );
+    }
+
+    #[test]
+    fn a_query_that_is_not_an_expression_leaves_the_calculator_silent() {
+        let registry = Registry::with_stubs(&Indexer::None);
+        for text in ["nautilus", "2 +", "abc 123", "10 km"] {
+            assert!(
+                registry
+                    .query_at(&QueryRequest::new(text, vec!["calculator".to_string()]), 0)
+                    .is_empty(),
+                "`{text}` must produce nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn an_injected_application_does_not_outrank_a_recognised_expression() {
+        let registry = Registry::with_stubs(&Indexer::None);
+        let app = ResultItem::new("applications", "app:org.gnome.Nautilus.desktop", "Files");
+        let request = QueryRequest::new(
+            "2 + 2",
+            vec!["calculator".to_string(), "applications".to_string()],
+        )
+        .with_injected(vec![app]);
+
+        let results = registry.query_at(&request, 0);
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].provider, "calculator",
+            "the calculator is the Top Hit for a query that parses"
+        );
     }
 
     #[test]

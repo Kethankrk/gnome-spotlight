@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -40,21 +41,22 @@ impl Harness {
     }
 
     pub fn spawn_with_args(extra: &[&str]) -> Self {
-        Self::start(&[], extra, true)
+        Self::start(extra, true, &[])
     }
 
-    /// A daemon with extra environment (e.g. a throw-away `HOME`) under a unique test name.
-    pub fn spawn_with_env(env: &[(&str, &str)]) -> Self {
-        Self::start(env, &[], true)
+    /// Extra arguments and extra environment (e.g. a throw-away `HOME`) together, under a unique
+    /// test name.
+    pub fn spawn_with_env(extra: &[&str], env: &[(&str, &str)]) -> Self {
+        Self::start(extra, true, env)
     }
 
     /// A daemon owning the real well-known name, always on a bus of its own so that it cannot
     /// race another test for it.
     pub fn spawn_with_default_name() -> Self {
-        Self::start(&[], &[], false)
+        Self::start(&[], false, &[])
     }
 
-    fn start(env: &[(&str, &str)], extra: &[&str], unique_name: bool) -> Self {
+    fn start(extra: &[&str], unique_name: bool, env: &[(&str, &str)]) -> Self {
         let (bus, address) = if unique_name {
             match std::env::var("DBUS_SESSION_BUS_ADDRESS") {
                 Ok(address) => (None, address),
@@ -222,4 +224,34 @@ pub fn block<T: Send + 'static, F: std::future::Future<Output = T> + Send + 'sta
     });
     rx.recv_timeout(CALL_TIMEOUT)
         .expect("the D-Bus client did not finish in time")
+}
+
+/// A caller-built result row: the shape `Query.options["injected"]` carries (contract §2).
+pub fn injected(
+    id: &str,
+    provider: &str,
+    title: &str,
+) -> HashMap<String, zbus::OwnedVariant> {
+    let ov = |value: &str| {
+        zbus::OwnedVariant::try_from(zbus::Variant::from(value.to_string()))
+            .expect("an owned string")
+    };
+    HashMap::from([
+        ("id".to_string(), ov(id)),
+        ("provider".to_string(), ov(provider)),
+        ("title".to_string(), ov(title)),
+    ])
+}
+
+/// `options` with an `injected` `aa{sv}` of caller-computed candidates.
+pub fn injected_options(
+    rows: Vec<HashMap<String, zbus::OwnedVariant>>,
+) -> HashMap<String, zbus::OwnedVariant> {
+    let array: Vec<zbus::OwnedVariant> = rows.into_iter().map(zbus::OwnedVariant::from).collect();
+    let mut options = HashMap::new();
+    options.insert(
+        "injected".to_string(),
+        zbus::OwnedVariant::try_from(zbus::Variant::from(array)).expect("an owned a{sv} array"),
+    );
+    options
 }
