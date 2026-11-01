@@ -12,16 +12,22 @@ import {ENGINE_NOT_RUNNING} from './lib/engine.js';
 
 const CARD_MAX_WIDTH = 640;
 const MONITOR_MARGIN = 80;
+const ROW_ICON_SIZE = 24;
+const FALLBACK_ICON = 'application-x-executable';
 
 export class LumenOverlay {
-    constructor({onClose = null} = {}) {
+    constructor({onClose = null, onActivate = null, onKey = null} = {}) {
         this._onClose = onClose;
+        this._onActivate = onActivate;
+        this._onKey = onKey;
         this._isOpen = false;
         this._grab = null;
         this._keyFocusId = 0;
         this._capturedEventId = 0;
         this._monitorsChangedId = 0;
         this._buttonPressId = 0;
+        this._rows = [];
+        this._selectedRow = null;
 
         this._card = new St.BoxLayout({
             style_class: 'lumen-card',
@@ -45,8 +51,24 @@ export class LumenOverlay {
             text: ENGINE_NOT_RUNNING,
         });
 
+        this._results = new St.BoxLayout({
+            style_class: 'lumen-results',
+            vertical: true,
+            x_expand: true,
+        });
+
+        this._scroll = new St.ScrollView({
+            style_class: 'lumen-scroll',
+            x_expand: true,
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            child: this._results,
+        });
+
         this._card.add_child(this._entry);
         this._card.add_child(this._status);
+        this._card.add_child(this._scroll);
+
 
         this._backdrop = new St.Widget({
             style_class: 'lumen-backdrop',
@@ -125,7 +147,57 @@ export class LumenOverlay {
 
     /** Show the daemon handshake state (`{status, message}` from lib/engine.js). */
     setEngineState(state) {
-        this._status.set_text(state?.message ?? ENGINE_NOT_RUNNING);
+        this.setStatus(state?.message ?? ENGINE_NOT_RUNNING);
+    }
+
+    /** The one line under the entry: engine state, or why an activation failed. */
+    setStatus(text) {
+        this._status.set_text(text ?? '');
+    }
+
+    /**
+     * Render a view model from lib/viewmodel.js. Row indices are the `flat` model order: the Top
+     * Hit first, then each section. Clicking a row calls `onActivate(index)`.
+     */
+    setResults({topHit = null, sections = []} = {}) {
+        this._clearRows();
+
+        if (topHit) {
+            const group = new St.BoxLayout({
+                style_class: 'lumen-tophit',
+                vertical: true,
+                x_expand: true,
+            });
+            group.add_child(this._createRow(topHit, 0));
+            this._results.add_child(group);
+        }
+
+        let index = topHit ? 1 : 0;
+        for (const section of sections) {
+            this._results.add_child(new St.Label({
+                style_class: 'lumen-section-header',
+                text: section.label ?? section.provider ?? '',
+                x_align: Clutter.ActorAlign.START,
+            }));
+            for (const item of section.items ?? [])
+                this._results.add_child(this._createRow(item, index++));
+        }
+
+        this.setSelected(this._rows.length > 0 ? 0 : -1);
+    }
+
+    /** Highlight row `index` (a `flat` index) and scroll it into view. */
+    setSelected(index) {
+        this._selectedRow?.remove_style_class_name('lumen-row-selected');
+        this._selectedRow = null;
+
+        const row = this._rows[index] ?? null;
+        if (!row)
+            return;
+
+        row.add_style_class_name('lumen-row-selected');
+        this._selectedRow = row;
+        this._scrollIntoView(row);
     }
 
     destroy() {
@@ -147,7 +219,90 @@ export class LumenOverlay {
         this._card = null;
         this._entry = null;
         this._status = null;
+        this._scroll = null;
+        this._results = null;
+        this._rows = [];
+        this._selectedRow = null;
         this._onClose = null;
+        this._onActivate = null;
+        this._onKey = null;
+    }
+
+    _clearRows() {
+        for (const child of this._results.get_children())
+            child.destroy();
+
+        this._rows = [];
+        this._selectedRow = null;
+    }
+
+    _createRow(result, index) {
+        const row = new St.BoxLayout({
+            style_class: 'lumen-row',
+            vertical: false,
+            x_expand: true,
+            reactive: true,
+            track_hover: true,
+            spacing: 10,
+        });
+
+        row.add_child(new St.Icon({
+            style_class: 'lumen-row-icon',
+            icon_name: result.icon || FALLBACK_ICON,
+            icon_size: ROW_ICON_SIZE,
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+
+        const text = new St.BoxLayout({
+            style_class: 'lumen-row-text',
+            vertical: true,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        text.add_child(new St.Label({
+            style_class: 'lumen-row-title',
+            text: result.title ?? '',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+        }));
+        if (result.subtitle) {
+            text.add_child(new St.Label({
+                style_class: 'lumen-row-subtitle',
+                text: result.subtitle,
+                x_expand: true,
+                x_align: Clutter.ActorAlign.START,
+            }));
+        }
+        row.add_child(text);
+
+        row.connect('button-press-event', () => {
+            this.setSelected(index);
+            this._onActivate?.(index);
+            return Clutter.EVENT_STOP;
+        });
+
+        this._rows[index] = row;
+        return row;
+    }
+
+    // Rows live in mixed parents (the top-hit group, the section boxes), so measure against the
+    // scrolled content rather than the row's own parent.
+    _scrollIntoView(row) {
+        const adjustment = this._scroll?.get_vscroll_bar()?.get_adjustment();
+        if (!adjustment)
+            return;
+
+        const [, rowY] = row.get_transformed_position();
+        const [, contentY] = this._results.get_transformed_position();
+        const top = rowY - contentY;
+        const bottom = top + row.get_height();
+        const value = adjustment.get_value();
+        const page = adjustment.get_page_size();
+
+        if (top < value)
+            adjustment.set_value(top);
+        else if (bottom > value + page)
+            adjustment.set_value(bottom - page);
     }
 
     // Ticket 15 replaces this with the monitor under the pointer.
@@ -170,6 +325,10 @@ export class LumenOverlay {
             this.close();
             return Clutter.EVENT_STOP;
         }
+
+        // The list owns the navigation keys; returns true from `onKey` means "consumed".
+        if (this._onKey?.(event.get_key_symbol(), event.get_state(), event))
+            return Clutter.EVENT_STOP;
 
         return Clutter.EVENT_PROPAGATE;
     }
