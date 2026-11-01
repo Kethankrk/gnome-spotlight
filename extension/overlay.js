@@ -1,6 +1,7 @@
 // The summon overlay: a full-screen transparent backdrop with a translucent, rounded card in
 // front of it. Everything here is shell-only (St/Clutter/Main); the testable model lives in
-// lib/. Ticket 03 grows a results list and preview inside `card`; ticket 15 moves the placement
+// lib/. Ticket 03 grows a results list and preview inside `card`; ticket 04 fills the preview
+// pane below the list (its contents come from lib/preview.js); ticket 15 moves the placement
 // from the primary monitor to the pointer's monitor.
 
 import Clutter from 'gi://Clutter';
@@ -9,6 +10,7 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {ENGINE_NOT_RUNNING} from './lib/engine.js';
+import {buildPreview, PREVIEW_EMPTY_TEXT} from './lib/preview.js';
 
 const CARD_MAX_WIDTH = 640;
 const MONITOR_MARGIN = 80;
@@ -28,6 +30,7 @@ export class LumenOverlay {
         this._buttonPressId = 0;
         this._rows = [];
         this._selectedRow = null;
+        this._model = [];
 
         this._card = new St.BoxLayout({
             style_class: 'lumen-card',
@@ -68,6 +71,40 @@ export class LumenOverlay {
         this._card.add_child(this._entry);
         this._card.add_child(this._status);
         this._card.add_child(this._scroll);
+
+        // The preview pane sits below the result list and mirrors the selected row. It is hidden
+        // while nothing is selected and shows a muted line when the row has nothing to show.
+        this._preview = new St.BoxLayout({
+            style_class: 'lumen-preview',
+            vertical: true,
+            x_expand: true,
+            visible: false,
+        });
+
+        this._previewTitle = new St.Label({
+            style_class: 'lumen-preview-title',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+        });
+
+        this._previewRows = new St.BoxLayout({
+            style_class: 'lumen-preview-rows',
+            vertical: true,
+            x_expand: true,
+        });
+
+        this._previewEmpty = new St.Label({
+            style_class: 'lumen-preview-empty',
+            text: PREVIEW_EMPTY_TEXT,
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+            visible: false,
+        });
+
+        this._preview.add_child(this._previewTitle);
+        this._preview.add_child(this._previewRows);
+        this._preview.add_child(this._previewEmpty);
+        this._card.add_child(this._preview);
 
 
         this._backdrop = new St.Widget({
@@ -159,7 +196,8 @@ export class LumenOverlay {
      * Render a view model from lib/viewmodel.js. Row indices are the `flat` model order: the Top
      * Hit first, then each section. Clicking a row calls `onActivate(index)`.
      */
-    setResults({topHit = null, sections = []} = {}) {
+    setResults(model = {}) {
+        const {topHit = null, sections = []} = model;
         this._clearRows();
 
         if (topHit) {
@@ -183,21 +221,30 @@ export class LumenOverlay {
                 this._results.add_child(this._createRow(item, index++));
         }
 
+        // Row index == flat index, so `flat` is also what the preview pane looks the selected row
+        // up in. Falling back to the same ordering covers a caller that only passes topHit/sections.
+        this._model = Array.isArray(model.flat)
+            ? model.flat
+            : [topHit, ...sections.flatMap(section => section.items ?? [])].filter(item => item);
+
         this.setSelected(this._rows.length > 0 ? 0 : -1);
     }
 
-    /** Highlight row `index` (a `flat` index) and scroll it into view. */
+    /** Highlight row `index` (a `flat` index), scroll it into view and preview it. */
     setSelected(index) {
         this._selectedRow?.remove_style_class_name('lumen-row-selected');
         this._selectedRow = null;
 
         const row = this._rows[index] ?? null;
-        if (!row)
+        if (!row) {
+            this._setPreview(null);
             return;
+        }
 
         row.add_style_class_name('lumen-row-selected');
         this._selectedRow = row;
         this._scrollIntoView(row);
+        this._setPreview(this._model[index] ?? null);
     }
 
     destroy() {
@@ -221,8 +268,13 @@ export class LumenOverlay {
         this._status = null;
         this._scroll = null;
         this._results = null;
+        this._preview = null;
+        this._previewTitle = null;
+        this._previewRows = null;
+        this._previewEmpty = null;
         this._rows = [];
         this._selectedRow = null;
+        this._model = [];
         this._onClose = null;
         this._onActivate = null;
         this._onKey = null;
@@ -234,6 +286,55 @@ export class LumenOverlay {
 
         this._rows = [];
         this._selectedRow = null;
+        this._model = [];
+    }
+
+    // The pane follows the selection: `null` hides it, a result with no detail keeps it visible
+    // with the muted empty state (contract §6, story 53).
+    _setPreview(result) {
+        if (!this._preview)
+            return;
+
+        for (const child of this._previewRows.get_children())
+            child.destroy();
+
+        if (!result) {
+            this._preview.hide();
+            return;
+        }
+
+        const {title, rows} = buildPreview(result);
+        this._previewTitle.set_text(title);
+        this._previewTitle.visible = title !== '';
+        this._previewEmpty.visible = rows.length === 0;
+
+        for (const {label, value} of rows)
+            this._previewRows.add_child(this._createPreviewRow(label, value));
+
+        this._preview.show();
+    }
+
+    _createPreviewRow(label, value) {
+        const row = new St.BoxLayout({
+            style_class: 'lumen-preview-row',
+            vertical: false,
+            x_expand: true,
+        });
+
+        row.add_child(new St.Label({
+            style_class: 'lumen-preview-label',
+            text: label,
+            y_align: Clutter.ActorAlign.START,
+        }));
+        row.add_child(new St.Label({
+            style_class: 'lumen-preview-value',
+            text: value,
+            line_wrap: true,
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+        }));
+
+        return row;
     }
 
     _createRow(result, index) {
