@@ -43,11 +43,12 @@ fn daemon_owns_the_lumen_name_and_reports_a_working_engine() {
     assert_eq!(
         capabilities,
         vec![
+            "recent".to_string(),
             "clipboard".to_string(),
             "calculator".to_string(),
             "websearch".to_string()
         ],
-        "without an indexer the files capability is absent; the clipboard provider is always there"
+        "without an indexer the files capability is absent; recent documents and the clipboard are always there"
     );
     assert!(!clipboard_enabled, "clipboard history is off by default");
 

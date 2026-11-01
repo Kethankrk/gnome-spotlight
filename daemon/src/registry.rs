@@ -9,7 +9,7 @@ use crate::index;
 use crate::protocol::{ResultItem, CAPABILITY_IDS, PROVIDER_IDS};
 use crate::providers::calculator::Calculator;
 use crate::providers::clipboard::{self, ClipboardProvider};
-use crate::providers::{files, Provider, QueryRequest, Stub};
+use crate::providers::{files, recent, Provider, QueryRequest, Stub};
 use crate::ranking;
 use crate::store::clipboard::ClipboardStore;
 
@@ -33,8 +33,9 @@ pub struct Registry {
 
 impl Registry {
     /// The registry the daemon serves: every provider present, `files` backed by whichever index
-    /// the configuration selected, the calculator real, the clipboard sharing `clipboard`, and
-    /// the rest still stubs until their ticket lands.
+    /// the configuration selected, the calculator real, the recent-documents list read from the
+    /// desktop's own cache, the clipboard sharing `clipboard`, and the rest still stubs until
+    /// their ticket lands.
     ///
     /// Building it opens the index, which for `LocalSearch` means loading the library and probing
     /// the endpoint on this thread — before the bus name is owned, so the capability is right
@@ -44,7 +45,7 @@ impl Registry {
         let providers: Vec<Box<dyn Provider>> = vec![
             Box::new(Stub::new("applications", false)),
             Box::new(files::Files::new(Arc::clone(&index))),
-            Box::new(Stub::new("recent", false)),
+            Box::new(recent::Recent::new()),
             Box::new(ClipboardProvider::new(Arc::clone(&clipboard))),
             Box::new(Calculator::new()),
             Box::new(Stub::new("actions", false)),
@@ -148,11 +149,12 @@ mod tests {
         assert_eq!(
             without_index.capabilities(),
             vec![
+                "recent".to_string(),
                 "clipboard".to_string(),
                 "calculator".to_string(),
                 "websearch".to_string()
             ],
-            "the clipboard provider is always there; without an indexer files is not"
+            "the recent and clipboard providers are always there; without an indexer files is not"
         );
 
         let with_index = Registry::with_stubs(&Indexer::Fake { seed: None });
@@ -160,6 +162,7 @@ mod tests {
             with_index.capabilities(),
             vec![
                 "files".to_string(),
+                "recent".to_string(),
                 "clipboard".to_string(),
                 "calculator".to_string(),
                 "websearch".to_string()
